@@ -339,11 +339,23 @@ TAG_PREFETCHING = env('DD_TAG_PREFETCHING')
 # ------------------------------------------------------------------------------
 # DATABASE
 # ------------------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+server_cert_path = os.environ.get("DB_SERVER_CERT_PATH", os.path.join(BASE_DIR, '../secret/cdb-dev/server-ca.pem'))  # noqa
+client_cert_path = os.environ.get("DB_CLIENT_CERT_PATH",os.path.join(BASE_DIR, '../secret/cdb-dev/client-cert.pem'))  # noqa
+client_key_path = os.environ.get("DB_CLIENT_KEY_PATH", os.path.join(BASE_DIR, '../secret/cdb-dev/client-key.pem'))  # noqa
 
 # Parse database connection url strings like psql://user:pass@127.0.0.1:8458/db
 if os.getenv('DD_DATABASE_URL') is not None:
     DATABASES = {
         'default': env.db('DD_DATABASE_URL')
+    }
+    for dbname in ["default"]:
+        DATABASES[dbname]["OPTIONS"] = {
+            'sslmode': 'require',
+            'sslrootcert': server_cert_path,
+            'sslcert': client_cert_path,  # noqa
+            'sslkey': client_key_path  # noqa
     }
 else:
     DATABASES = {
