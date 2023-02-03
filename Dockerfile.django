@@ -110,8 +110,9 @@ RUN \
     mkdir /var/run/${appuser} && \
     chown ${appuser} /var/run/${appuser} && \
 	  chmod g=u /var/run/${appuser} && \
-    chown -R root:${appuser} /app/dojo/certs && \
-    chmod -R 600 /app/dojo/certs/* && \
+    chown 1001:1001 /app/dojo/certs/server-ca.pem && \
+    chown 1001:1001 /app/dojo/certs/client-cert.pem && \
+    chown 1001:1001 /app/dojo/certs/client-key.pem && \
     mkdir -p media/threat && chown -R ${uid} media
 USER ${uid}
 ENV \
@@ -134,7 +135,10 @@ ENV \
   DD_UWSGI_MODE="socket" \
   DD_UWSGI_ENDPOINT="0.0.0.0:3031" \
   DD_UWSGI_NUM_OF_PROCESSES="2" \
-  DD_UWSGI_NUM_OF_THREADS="2"
+  DD_UWSGI_NUM_OF_THREADS="2" \
+  DB_SERVER_CERT_PATH=/app/dojo/certs/server-ca.pem \
+  DB_CLIENT_CERT_PATH=/app/dojo/certs/client-cert.pem \
+  DB_CLIENT_KEY_PATH=/app/dojo/certs/client-key.pem
 ENTRYPOINT ["/entrypoint-uwsgi.sh"]
 
 FROM django as django-unittests
