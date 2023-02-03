@@ -110,7 +110,8 @@ RUN \
     mkdir /var/run/${appuser} && \
     chown ${appuser} /var/run/${appuser} && \
 	  chmod g=u /var/run/${appuser} && \
-    chmod -R 600 /app/cert/* \
+    chown -R root:${appuser} /app/dojo/certs && \
+    chmod -R 775 /app/dojo/certs && \
     mkdir -p media/threat && chown -R ${uid} media
 USER ${uid}
 ENV \
