@@ -65,6 +65,7 @@ spec:
           name: {{ .name }}
           {{- else if (eq .type "secret") }}
           secretName: {{ .name }}
+          defaultMode: 0600
           {{- else if (eq .type "hostPath") }}
           type: {{ .pathType | default "Directory" }}
           path: {{ .hostPath }}
