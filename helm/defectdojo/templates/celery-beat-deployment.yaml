@@ -35,6 +35,24 @@ spec:
         checksum/esecret: {{ include (print $.Template.BasePath "/extra-secret.yaml") . | sha256sum }}
       {{- end }}
     spec:
+    {{- if .Values.admin.ssl }}
+      initContainers:
+        - name: init-database-cert
+          image: busybox
+          command:
+            - sh
+            - -c
+            - cp -LR /home/appuser/mnt/* /home/appuser/local/ && chown -R 999:999 /home/appuser/local
+              && chmod -R 777 /home/appuser/local && chmod -R 600 /home/appuser/local/certs/*
+              && ls -la /home/appuser/local
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - mountPath: /home/appuser/mnt
+              name: ssl-volume
+            - mountPath: /home/appuser/local
+              name: local-volume
+      {{- end }}
       serviceAccountName: {{ $fullName }}
       {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -43,6 +61,21 @@ spec:
       volumes:
       - name: run
         emptyDir: {}
+      {{- if .Values.admin.ssl }}
+      - name: local-volume
+        emptyDir: { }
+      - name: ssl-volume
+        secret:
+          secretName: database-cert
+          defaultMode: 0600
+          items:
+            - key: server-ca.pem
+              path: certs/server-ca.pem
+            - key: client-cert.pem
+              path: certs/client-cert.pem
+            - key: client-key.pem
+              path: certs/client-key.pem
+      {{- end }}
       {{- range .Values.celery.extraVolumes }}
       - name: userconfig-{{ .name }}
         {{ .type }}:

@@ -371,6 +371,13 @@ else:
             'PORT': env('DD_DATABASE_PORT'),
         }
     }
+    for dbname in ["default"]:
+        DATABASES[dbname]["OPTIONS"] = {
+            'sslmode': 'require',
+            'sslrootcert': server_cert_path,
+            'sslcert': client_cert_path,  # noqa
+            'sslkey': client_key_path  # noqa
+    }
 
 # Track migrations through source control rather than making migrations locally
 if env('DD_TRACK_MIGRATIONS'):
