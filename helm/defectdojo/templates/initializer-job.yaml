@@ -69,6 +69,12 @@ spec:
               path: certs/client-key.pem
       {{- end }}
       containers:
+        {{- if .Values.admin.ssl }}
+        volumeMounts:
+        - name: local-volume
+          mountPath: "/app/dojo/local"
+          readOnly: true
+        {{- end }}    
       {{- if .Values.cloudsql.enabled  }}
       - name: cloudsql-proxy
         image: {{ .Values.cloudsql.image.repository }}:{{ .Values.cloudsql.image.tag }}
