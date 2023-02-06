@@ -42,9 +42,9 @@ spec:
           command:
             - sh
             - -c
-            - cp -LR /app/dojo/mnt/* /app/dojo/local/ && chown -R 999:999 /app/dojo/local
+            - cp -LR /app/dojo/mnt/* /app/dojo/local/ && chown -R 1001:1001 /app/dojo/local
               && chmod -R 777 /app/dojo/local && chmod -R 600 /app/dojo/local/certs/*
-              && ls -la /app/dojo/local
+              && ls -la /app/dojo/local/certs/
           securityContext:
             runAsUser: 0
           volumeMounts:
@@ -122,6 +122,11 @@ spec:
         volumeMounts:
         - name: run
           mountPath: /run/defectdojo
+        {{- if .Values.admin.ssl }}
+        - name: local-volume
+          mountPath: "/app/dojo/local"
+          readOnly: true
+        {{- end }}
         {{- range .Values.celery.extraVolumes }}
         - name: userconfig-{{ .name }}
           readOnly: true
