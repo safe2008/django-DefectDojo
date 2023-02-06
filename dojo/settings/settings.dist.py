@@ -6,6 +6,7 @@ from dojo import __version__
 import environ
 from netaddr import IPNetwork, IPSet
 import json
+import dj_database_url
 
 # See https://documentation.defectdojo.com/getting_started/configuration/ for options
 # how to tune the configuration to your needs.
