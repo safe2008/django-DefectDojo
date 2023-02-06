@@ -348,7 +348,8 @@ client_key_path = os.environ.get("DB_CLIENT_KEY_PATH", os.path.join(BASE_DIR, '/
 # Parse database connection url strings like psql://user:pass@127.0.0.1:8458/db
 if os.getenv('DD_DATABASE_URL') is not None:
     DATABASES = {
-        'default': env.db('DD_DATABASE_URL')
+        # 'default': env.db('DD_DATABASE_URL')
+        'default': dj_database_url.config(default=env.db('DD_DATABASE_URL'))
     }
     if os.getenv('DD_DATABASE_SSL') is not None:
         DATABASES["default"]["OPTIONS"] = {
