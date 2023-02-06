@@ -43,7 +43,7 @@ spec:
     spec:
     {{- if .Values.admin.ssl }}
       initContainers:
-        - name: init-psql-tls
+        - name: init-database-cert
           image: busybox
           command:
             - sh
@@ -98,7 +98,6 @@ spec:
           name: {{ .name }}
           {{- else if (eq .type "secret") }}
           secretName: {{ .name }}
-          defaultMode: 0600
           {{- else if (eq .type "hostPath") }}
           type: {{ .pathType | default "Directory" }}
           path: {{ .hostPath }}
@@ -158,16 +157,14 @@ spec:
         volumeMounts:
         - name: run
           mountPath: /run/defectdojo
-        {{- if  .Values.django.uwsgi.certificates.enabled }}
-        - name: cert-mount
-          mountPath: {{ .Values.django.uwsgi.certificates.certMountPath }}
-        {{- end }}
         {{- if .Values.admin.ssl }}
-        {{- if (eq .container "uwsgi") }}
         - name: local-volume
           mountPath: "/app/dojo/local"
           readOnly: true
         {{- end }}
+        {{- if  .Values.django.uwsgi.certificates.enabled }}
+        - name: cert-mount
+          mountPath: {{ .Values.django.uwsgi.certificates.certMountPath }}
         {{- end }}
         {{- range .Values.django.extraVolumes }}
         {{- if (eq .container "uwsgi") }}
