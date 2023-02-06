@@ -69,12 +69,6 @@ spec:
               path: certs/client-key.pem
       {{- end }}
       containers:
-        {{- if .Values.admin.ssl }}
-        volumeMounts:
-        - name: local-volume
-          mountPath: "/app/dojo/local"
-          readOnly: true
-        {{- end }}    
       {{- if .Values.cloudsql.enabled  }}
       - name: cloudsql-proxy
         image: {{ .Values.cloudsql.image.repository }}:{{ .Values.cloudsql.image.tag }}
@@ -105,6 +99,14 @@ spec:
         {{- end }}          
         command:
           - /entrypoint-initializer.sh
+        volumeMounts:
+        - name: run
+          mountPath: /run/defectdojo
+        {{- if .Values.admin.ssl }}
+        - name: local-volume
+          mountPath: "/app/dojo/local"
+          readOnly: true
+        {{- end }}
         envFrom:
         - configMapRef:
             name: {{ $fullName }}
