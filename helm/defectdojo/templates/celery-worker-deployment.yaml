@@ -35,12 +35,45 @@ spec:
         checksum/esecret: {{ include (print $.Template.BasePath "/extra-secret.yaml") . | sha256sum }}
       {{- end }}
     spec:
+    {{- if .Values.admin.ssl }}
+      initContainers:
+        - name: init-database-cert
+          image: busybox
+          command:
+            - sh
+            - -c
+            - cp -LR /app/dojo/mnt/* /app/dojo/local/ && chown -R 1001:1001 /app/dojo/local
+              && chmod -R 777 /app/dojo/local && chmod -R 600 /app/dojo/local/certs/*
+              && ls -la /app/dojo/local/certs/
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - mountPath: /app/dojo/mnt
+              name: ssl-volume
+            - mountPath: /app/dojo/local
+              name: local-volume
+      {{- end }}
       serviceAccountName: {{ $fullName }}
       {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
       - name: {{ .Values.imagePullSecrets }}
       {{- end }}
       volumes:
+      {{- if .Values.admin.ssl }}
+      - name: local-volume
+        emptyDir: { }
+      - name: ssl-volume
+        secret:
+          secretName: psql-tls
+          defaultMode: 0600
+          items:
+            - key: server-ca.pem
+              path: certs/server-ca.pem
+            - key: client-cert.pem
+              path: certs/client-cert.pem
+            - key: client-key.pem
+              path: certs/client-key.pem
+      {{- end }}
       {{- range .Values.celery.extraVolumes }}
       - name: userconfig-{{ .name }}
         {{ .type }}:
