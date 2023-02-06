@@ -59,6 +59,8 @@ spec:
       - name: {{ .Values.imagePullSecrets }}
       {{- end }}
       volumes:
+      - name: run
+        emptyDir: {}
       {{- if .Values.admin.ssl }}
       - name: local-volume
         emptyDir: { }
@@ -108,15 +110,23 @@ spec:
         - "-ip_address_types=PRIVATE"
         {{- end }}
       {{- end }}
-      - name: celery
+      - command:
+        - /entrypoint-celery-worker.sh
+        name: celery
         image: "{{ template "celery.repository" . }}:{{ .Values.tag }}"
         imagePullPolicy: {{ .Values.imagePullPolicy }}
         {{- if .Values.securityContext.enabled }}
         securityContext:
           {{- toYaml .Values.securityContext.djangoSecurityContext | nindent 10 }}
         {{- end }}
-        command: ['/entrypoint-celery-worker.sh']
         volumeMounts:
+        - name: run
+          mountPath: /run/defectdojo
+        {{- if .Values.admin.ssl }}
+        - name: local-volume
+          mountPath: "/app/dojo/local"
+          readOnly: true
+        {{- end }}
         {{- range .Values.celery.extraVolumes }}
         - name: userconfig-{{ .name }}
           readOnly: true
@@ -134,10 +144,10 @@ spec:
           valueFrom:
             secretKeyRef:
             {{- if eq .Values.celery.broker "rabbitmq" }}
-              name: {{ .Values.rabbitmq.auth.existingPasswordSecret | default "defectdojo-rabbitmq-specific"}}
+              name: {{ .Values.rabbitmq.auth.existingPasswordSecret | default "defectdojo-rabbitmq-specific" }}
               key: {{ .Values.rabbitmq.auth.secretPasswordKey | default "rabbitmq-password" }}  
             {{- else if eq .Values.celery.broker "redis" }}
-              name: {{ .Values.redis.auth.existingSecret| default "defectdojo-redis-specific" }}
+              name: {{ .Values.redis.auth.existingSecret | default "defectdojo-redis-specific" }}
               key: {{ .Values.redis.auth.existingSecretPasswordKey | default "redis-password" }}
             {{- end }}
         - name: DD_DATABASE_PASSWORD
