@@ -6,7 +6,6 @@ from dojo import __version__
 import environ
 from netaddr import IPNetwork, IPSet
 import json
-import dj_database_url
 
 # See https://documentation.defectdojo.com/getting_started/configuration/ for options
 # how to tune the configuration to your needs.
@@ -349,8 +348,7 @@ client_key_path = os.environ.get("DB_CLIENT_KEY_PATH", os.path.join(BASE_DIR, '/
 # Parse database connection url strings like psql://user:pass@127.0.0.1:8458/db
 if os.getenv('DD_DATABASE_URL') is not None:
     DATABASES = {
-        # 'default': env.db('DD_DATABASE_URL')
-        'default': dj_database_url.config(default=env.db('DD_DATABASE_URL'))
+        'default': env.db('DD_DATABASE_URL')
     }
     if os.getenv('DD_DATABASE_SSL') is not None:
         DATABASES["default"]["OPTIONS"] = {
