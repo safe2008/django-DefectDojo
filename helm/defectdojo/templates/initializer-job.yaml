@@ -68,7 +68,6 @@ spec:
             - key: client-key.pem
               path: certs/client-key.pem
       {{- end }}
-      {{- end }}
       containers:
       {{- if .Values.cloudsql.enabled  }}
       - name: cloudsql-proxy
