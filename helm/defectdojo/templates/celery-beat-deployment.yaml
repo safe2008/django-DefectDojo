@@ -42,15 +42,15 @@ spec:
           command:
             - sh
             - -c
-            - cp -LR /home/appuser/mnt/* /home/appuser/local/ && chown -R 999:999 /home/appuser/local
-              && chmod -R 777 /home/appuser/local && chmod -R 600 /home/appuser/local/certs/*
-              && ls -la /home/appuser/local
+            - cp -LR /app/dojo/mnt/* /app/dojo/local/ && chown -R 999:999 /app/dojo/local
+              && chmod -R 777 /app/dojo/local && chmod -R 600 /app/dojo/local/certs/*
+              && ls -la /app/dojo/local
           securityContext:
             runAsUser: 0
           volumeMounts:
-            - mountPath: /home/appuser/mnt
+            - mountPath: /app/dojo/mnt
               name: ssl-volume
-            - mountPath: /home/appuser/local
+            - mountPath: /app/dojo/local
               name: local-volume
       {{- end }}
       serviceAccountName: {{ $fullName }}
