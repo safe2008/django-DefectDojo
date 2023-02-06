@@ -350,12 +350,12 @@ if os.getenv('DD_DATABASE_URL') is not None:
     DATABASES = {
         'default': env.db('DD_DATABASE_URL')
     }
-    for dbname in ["default"]:
-        DATABASES[dbname]["OPTIONS"] = {
-            'sslmode': 'require',
-            'sslrootcert': server_cert_path,
-            'sslcert': client_cert_path,  # noqa
-            'sslkey': client_key_path  # noqa
+    if os.getenv('DD_DATABASE_SSL') is not None:
+        DATABASES["default"]["OPTIONS"] = {
+        'sslmode': 'require',
+        'sslrootcert': server_cert_path,
+        'sslcert': client_cert_path,  # noqa
+        'sslkey': client_key_path  # noqa
     }
 else:
     DATABASES = {
@@ -371,12 +371,12 @@ else:
             'PORT': env('DD_DATABASE_PORT'),
         }
     }
-    for dbname in ["default"]:
-        DATABASES[dbname]["OPTIONS"] = {
-            'sslmode': 'require',
-            'sslrootcert': server_cert_path,
-            'sslcert': client_cert_path,  # noqa
-            'sslkey': client_key_path  # noqa
+    if os.getenv('DD_DATABASE_SSL') is not None:
+        DATABASES["default"]["OPTIONS"] = {
+        'sslmode': 'require',
+        'sslrootcert': server_cert_path,
+        'sslcert': client_cert_path,  # noqa
+        'sslkey': client_key_path  # noqa
     }
 
 # Track migrations through source control rather than making migrations locally
