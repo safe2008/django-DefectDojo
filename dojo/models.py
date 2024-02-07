@@ -31,13 +31,13 @@ from multiselectfield import MultiSelectField
 from django import forms
 from django.utils.translation import gettext as _
 from dateutil.relativedelta import relativedelta
+from datetime import datetime
 from tagulous.models import TagField
+from tagulous.models.managers import FakeTagRelatedManager
 import tagulous.admin
 from django.db.models import JSONField
 import hyperlink
 from cvss import CVSS3
-from dojo.settings.settings import SLA_BUSINESS_DAYS
-from numpy import busday_count
 
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,8 @@ SEVERITY_CHOICES = (('Info', 'Info'), ('Low', 'Low'), ('Medium', 'Medium'),
                     ('High', 'High'), ('Critical', 'Critical'))
 
 SEVERITIES = [s[0] for s in SEVERITY_CHOICES]
+
+EFFORT_FOR_FIXING_CHOICES = (('', ''), ('Low', 'Low'), ('Medium', 'Medium'), ('High', 'High'))
 
 # fields returned in statistics, typically all status fields
 STATS_FIELDS = ['active', 'verified', 'duplicate', 'false_p', 'out_of_scope', 'is_mitigated', 'risk_accepted', 'total']
@@ -95,6 +97,28 @@ def _get_statistics_for_queryset(qs, annotation_factory):
     values_total = values_total.aggregate(**annotation_factory())
     stats['total'] = values_total
     return stats
+
+
+def _manage_inherited_tags(obj, incoming_inherited_tags, potentially_existing_tags=[]):
+    # get copies of the current tag lists
+    current_inherited_tags = [] if isinstance(obj.inherited_tags, FakeTagRelatedManager) else [tag.name for tag in obj.inherited_tags.all()]
+    tag_list = potentially_existing_tags if isinstance(obj.tags, FakeTagRelatedManager) or len(potentially_existing_tags) > 0 else [tag.name for tag in obj.tags.all()]
+    # Clean existing tag list from the old inherited tags. This represents the tags on the object and not the product
+    cleaned_tag_list = [tag for tag in tag_list if tag not in current_inherited_tags]
+    # Add the incoming inherited tag list
+    if incoming_inherited_tags:
+        for tag in incoming_inherited_tags:
+            if tag not in cleaned_tag_list:
+                cleaned_tag_list.append(tag)
+    # Update the current list of inherited tags. iteratively do this because of tagulous object restraints
+    if isinstance(obj.inherited_tags, FakeTagRelatedManager):
+        obj.inherited_tags.set_tag_list(incoming_inherited_tags)
+        if incoming_inherited_tags:
+            obj.tags.set_tag_list(cleaned_tag_list)
+    else:
+        obj.inherited_tags.set(incoming_inherited_tags)
+        if incoming_inherited_tags:
+            obj.tags.set(cleaned_tag_list)
 
 
 @deconstructible
@@ -247,23 +271,14 @@ class Role(models.Model):
 
 
 class System_Settings(models.Model):
-    enable_auditlog = models.BooleanField(
-        default=True,
-        blank=False,
-        verbose_name=_('Enable audit logging'),
-        help_text=_("With this setting turned on, Dojo maintains an audit log "
-                  "of changes made to entities (Findings, Tests, Engagements, Procuts, ...)"
-                  "If you run big import you may want to disable this "
-                  "because the way django-auditlog currently works, there's a "
-                  "big performance hit. Especially during (re-)imports."))
     enable_deduplication = models.BooleanField(
         default=False,
         blank=False,
         verbose_name=_('Deduplicate findings'),
-        help_text=_("With this setting turned on, Dojo deduplicates findings by "
+        help_text=_("With this setting turned on, DefectDojo deduplicates findings by "
                   "comparing endpoints, cwe fields, and titles. "
                   "If two findings share a URL and have the same CWE or "
-                  "title, Dojo marks the less recent finding as a duplicate. "
+                  "title, DefectDojo marks the recent finding as a duplicate. "
                   "When deduplication is enabled, a list of "
                   "deduplicated findings is added to the engagement view."))
     delete_duplicates = models.BooleanField(default=False, blank=False, help_text=_("Requires next setting: maximum number of duplicates to retain."))
@@ -335,7 +350,25 @@ class System_Settings(models.Model):
     enable_mail_notifications = models.BooleanField(default=False, blank=False)
     mail_notifications_to = models.CharField(max_length=200, default='',
                                              blank=True)
-    false_positive_history = models.BooleanField(default=False, help_text=_("DefectDojo will automatically mark the finding as a false positive if the finding has been previously marked as a false positive. Not needed when using deduplication, advised to not combine these two."))
+
+    false_positive_history = models.BooleanField(
+        default=False, help_text=_(
+            "(EXPERIMENTAL) DefectDojo will automatically mark the finding as a "
+            "false positive if an equal finding (according to its dedupe algorithm) "
+            "has been previously marked as a false positive on the same product. "
+            "ATTENTION: Although the deduplication algorithm is used to determine "
+            "if a finding should be marked as a false positive, this feature will "
+            "not work if deduplication is enabled since it doesn't make sense to use both."
+        )
+    )
+
+    retroactive_false_positive_history = models.BooleanField(
+        default=False, help_text=_(
+            "(EXPERIMENTAL) FP History will also retroactively mark/unmark all "
+            "existing equal findings in the same product as a false positives. "
+            "Only works if the False Positive History feature is also enabled."
+        )
+    )
 
     url_prefix = models.CharField(max_length=300, default='', blank=True, help_text=_("URL prefix if DefectDojo is installed in it's own virtual subdirectory."))
     team_name = models.CharField(max_length=100, default='', blank=True)
@@ -364,6 +397,12 @@ class System_Settings(models.Model):
                                           verbose_name=_('Grade F'),
                                           help_text=_("Percentage score for an "
                                                     "'F' <="))
+    enable_product_tag_inheritance = models.BooleanField(
+        default=False,
+        blank=False,
+        verbose_name=_('Enable Product Tag Inheritance'),
+        help_text=_("Enables product tag inheritance globally for all products. Any tags added on a product will automatically be added to all Engagements, Tests, and Findings"))
+
     enable_benchmark = models.BooleanField(
         default=True,
         blank=False,
@@ -398,20 +437,26 @@ class System_Settings(models.Model):
     enable_notify_sla_active = models.BooleanField(
         default=False,
         blank=False,
-        verbose_name=_("Enable Notifiy SLA's Breach for active Findings"),
+        verbose_name=_("Enable Notify SLA's Breach for active Findings"),
         help_text=_("Enables Notify when time to remediate according to Finding SLA's is breached for active Findings."))
 
     enable_notify_sla_active_verified = models.BooleanField(
         default=False,
         blank=False,
-        verbose_name=_("Enable Notifiy SLA's Breach for active, verified Findings"),
+        verbose_name=_("Enable Notify SLA's Breach for active, verified Findings"),
         help_text=_("Enables Notify when time to remediate according to Finding SLA's is breached for active, verified Findings."))
 
     enable_notify_sla_jira_only = models.BooleanField(
         default=False,
         blank=False,
-        verbose_name=_("Enable Notifiy SLA's Breach for Findings linked to JIRA"),
-        help_text=_("Enables Notify when time to remediate according to Finding SLA's is breached for Findings that are linked to JIRA issues."))
+        verbose_name=_("Enable Notify SLA's Breach only for Findings linked to JIRA"),
+        help_text=_("Enables Notify when time to remediate according to Finding SLA's is breached for Findings that are linked to JIRA issues. Notification is disabled for Findings not linked to JIRA issues"))
+
+    enable_notify_sla_exponential_backoff = models.BooleanField(
+        default=False,
+        blank=False,
+        verbose_name=_("Enable an exponential backoff strategy for SLA breach notifications."),
+        help_text=_("Enable an exponential backoff strategy for SLA breach notifications, e.g. 1, 2, 4, 8, etc. Otherwise it alerts every day"))
 
     allow_anonymous_survey_repsonse = models.BooleanField(
         default=False,
@@ -423,9 +468,6 @@ class System_Settings(models.Model):
     disclaimer = models.TextField(max_length=3000, default='', blank=True,
                                   verbose_name=_('Custom Disclaimer'),
                                   help_text=_("Include this custom disclaimer on all notifications and generated reports"))
-    column_widths = models.TextField(max_length=1500, blank=True)
-    drive_folder_ID = models.CharField(max_length=100, blank=True)
-    email_address = models.EmailField(max_length=100, blank=True)
     risk_acceptance_form_default_days = models.IntegerField(null=True, blank=True, default=180, help_text=_("Default expiry period for risk acceptance form."))
     risk_acceptance_notify_before_expiration = models.IntegerField(null=True, blank=True, default=10,
                     verbose_name=_('Risk acceptance expiration heads up days'), help_text=_("Notify X days before risk acceptance expires. Leave empty to disable."))
@@ -449,16 +491,6 @@ class System_Settings(models.Model):
         blank=False,
         verbose_name=_('Enable Endpoint Metadata Import'),
         help_text=_("With this setting turned off, endpoint metadata import will be disabled in the user interface."))
-    enable_google_sheets = models.BooleanField(
-        default=False,
-        blank=False,
-        verbose_name=_('Enable Google Sheets Integration'),
-        help_text=_("With this setting turned off, the Google sheets integration will be disabled in the user interface."))
-    enable_rules_framework = models.BooleanField(
-        default=False,
-        blank=False,
-        verbose_name=_('Enable Rules Framework'),
-        help_text=_("With this setting turned off, the rules framwork will be disabled in the user interface."))
     enable_user_profile_editable = models.BooleanField(
         default=True,
         blank=False,
@@ -524,6 +556,11 @@ class System_Settings(models.Model):
         blank=False,
         verbose_name=_("Password must contain one uppercase letter"),
         help_text=_("Requires user passwords to contain at least one uppercase letter (A-Z)."))
+    non_common_password_required = models.BooleanField(
+        default=True,
+        blank=False,
+        verbose_name=_("Password must not be common"),
+        help_text=_("Requires user passwords to not be part of list of common passwords."))
 
     from dojo.middleware import System_Settings_Manager
     objects = System_Settings_Manager()
@@ -820,9 +857,7 @@ class DojoMeta(models.Model):
 
 class SLA_Configuration(models.Model):
     name = models.CharField(max_length=128, unique=True, blank=False, verbose_name=_('Custom SLA Name'),
-        help_text=_('A unique name for the set of SLAs.')
-    )
-
+        help_text=_('A unique name for the set of SLAs.'))
     description = models.CharField(max_length=512, null=True, blank=True)
     critical = models.IntegerField(default=7, verbose_name=_('Critical Finding SLA Days'),
                                           help_text=_('number of days to remediate a critical finding.'))
@@ -832,14 +867,55 @@ class SLA_Configuration(models.Model):
                                           help_text=_('number of days to remediate a medium finding.'))
     low = models.IntegerField(default=120, verbose_name=_('Low Finding SLA Days'),
                                           help_text=_('number of days to remediate a low finding.'))
+    async_updating = models.BooleanField(default=False,
+                                            help_text=_('Findings under this SLA configuration are asynchronously being updated'))
 
     def clean(self):
-
         sla_days = [self.critical, self.high, self.medium, self.low]
 
         for sla_day in sla_days:
             if sla_day < 1:
                 raise ValidationError('SLA Days must be at least 1')
+
+    def save(self, *args, **kwargs):
+        # get the initial sla config before saving (if this is an existing sla config)
+        initial_sla_config = None
+        if self.pk is not None:
+            initial_sla_config = SLA_Configuration.objects.get(pk=self.pk)
+            # if initial config exists and async finding update is already running, revert sla config before saving
+            if initial_sla_config and self.async_updating:
+                self.critical = initial_sla_config.critical
+                self.high = initial_sla_config.high
+                self.medium = initial_sla_config.medium
+                self.low = initial_sla_config.low
+
+        super(SLA_Configuration, self).save(*args, **kwargs)
+
+        # if the initial sla config exists and async finding update is not running
+        if initial_sla_config is not None and not self.async_updating:
+            # check which sla days fields changed based on severity
+            severities = []
+            if initial_sla_config.critical != self.critical:
+                severities.append('Critical')
+            if initial_sla_config.high != self.high:
+                severities.append('High')
+            if initial_sla_config.medium != self.medium:
+                severities.append('Medium')
+            if initial_sla_config.low != self.low:
+                severities.append('Low')
+            # if severities have changed, update finding sla expiration dates with those severities
+            if len(severities):
+                # set the async updating flag to true for this sla config
+                self.async_updating = True
+                super(SLA_Configuration, self).save(*args, **kwargs)
+                # set the async updating flag to true for all products using this sla config
+                products = Product.objects.filter(sla_configuration=self)
+                for product in products:
+                    product.async_updating = True
+                    super(Product, product).save()
+                # launch the async task to update all finding sla expiration dates
+                from dojo.sla_config.helpers import update_sla_expiration_dates_sla_config_async
+                update_sla_expiration_dates_sla_config_async(self, tuple(severities), products)
 
     def __str__(self):
         return self.name
@@ -949,9 +1025,50 @@ class Product(models.Model):
     regulations = models.ManyToManyField(Regulation, blank=True)
 
     tags = TagField(blank=True, force_lowercase=True, help_text=_("Add tags that help describe this product. Choose from the list or add new tags. Press Enter key to add."))
-
+    enable_product_tag_inheritance = models.BooleanField(
+        default=False,
+        blank=False,
+        verbose_name=_('Enable Product Tag Inheritance'),
+        help_text=_("Enables product tag inheritance. Any tags added on a product will automatically be added to all Engagements, Tests, and Findings"))
     enable_simple_risk_acceptance = models.BooleanField(default=False, help_text=_('Allows simple risk acceptance by checking/unchecking a checkbox.'))
     enable_full_risk_acceptance = models.BooleanField(default=True, help_text=_('Allows full risk acceptance using a risk acceptance form, expiration date, uploaded proof, etc.'))
+
+    disable_sla_breach_notifications = models.BooleanField(
+        default=False,
+        blank=False,
+        verbose_name=_("Disable SLA breach notifications"),
+        help_text=_("Disable SLA breach notifications if configured in the global settings"))
+    async_updating = models.BooleanField(default=False,
+                                            help_text=_('Findings under this Product or SLA configuration are asynchronously being updated'))
+
+    def save(self, *args, **kwargs):
+        # get the product's sla config before saving (if this is an existing product)
+        initial_sla_config = None
+        if self.pk is not None:
+            initial_sla_config = getattr(Product.objects.get(pk=self.pk), 'sla_configuration', None)
+            # if initial sla config exists and async finding update is already running, revert sla config before saving
+            if initial_sla_config and self.async_updating:
+                self.sla_configuration = initial_sla_config
+
+        super(Product, self).save(*args, **kwargs)
+
+        # if the initial sla config exists and async finding update is not running
+        if initial_sla_config is not None and not self.async_updating:
+            # get the new sla config from the saved product
+            new_sla_config = getattr(self, 'sla_configuration', None)
+            # if the sla config has changed, update finding sla expiration dates within this product
+            if new_sla_config and (initial_sla_config != new_sla_config):
+                # set the async updating flag to true for this product
+                self.async_updating = True
+                super(Product, self).save(*args, **kwargs)
+                # set the async updating flag to true for the sla config assigned to this product
+                sla_config = getattr(self, 'sla_configuration', None)
+                if sla_config:
+                    sla_config.async_updating = True
+                    super(SLA_Configuration, sla_config).save()
+                # launch the async task to update all finding sla expiration dates
+                from dojo.product.helpers import update_sla_expiration_dates_product_async
+                update_sla_expiration_dates_product_async(self, sla_config)
 
     def __str__(self):
         return self.name
@@ -1060,8 +1177,7 @@ class Product(models.Model):
     @cached_property
     def open_findings_list(self):
         findings = Finding.objects.filter(test__engagement__product=self,
-                                          active=True,
-                                          )
+                                          active=True)
         findings_list = []
         for i in findings:
             findings_list.append(i.id)
@@ -1075,6 +1191,14 @@ class Product(models.Model):
     def get_absolute_url(self):
         from django.urls import reverse
         return reverse('view_product', args=[str(self.id)])
+
+    @property
+    def violates_sla(self):
+        findings = Finding.objects.filter(test__engagement__product=self, active=True)
+        for f in findings:
+            if f.violates_sla:
+                return True
+        return False
 
 
 class Product_Member(models.Model):
@@ -1284,6 +1408,7 @@ class Engagement(models.Model):
     deduplication_on_engagement = models.BooleanField(default=False, verbose_name=_('Deduplication within this engagement only'), help_text=_("If enabled deduplication will only mark a finding in this engagement as duplicate of another finding if both findings are in this engagement. If disabled, deduplication is on the product level."))
 
     tags = TagField(blank=True, force_lowercase=True, help_text=_("Add tags that help describe this engagement. Choose from the list or add new tags. Press Enter key to add."))
+    inherited_tags = TagField(blank=True, force_lowercase=True, help_text=_("Internal use tags sepcifically for maintaining parity with product. This field will be present as a subset in the tags field"))
 
     class Meta:
         ordering = ['-target_start']
@@ -1372,6 +1497,11 @@ class Engagement(models.Model):
         helper.prepare_duplicates_for_delete(engagement=self)
         super().delete(*args, **kwargs)
         calculate_grade(self.product)
+
+    def inherit_tags(self, potentially_existing_tags):
+        # get a copy of the tags to be inherited
+        incoming_inherited_tags = [tag.name for tag in self.product.tags.all()]
+        _manage_inherited_tags(self, incoming_inherited_tags, potentially_existing_tags=potentially_existing_tags)
 
 
 class CWE(models.Model):
@@ -1462,6 +1592,7 @@ class Endpoint(models.Model):
                                       through=Endpoint_Status)
 
     tags = TagField(blank=True, force_lowercase=True, help_text=_("Add tags that help describe this endpoint. Choose from the list or add new tags. Press Enter key to add."))
+    inherited_tags = TagField(blank=True, force_lowercase=True, help_text=_("Internal use tags sepcifically for maintaining parity with product. This field will be present as a subset in the tags field"))
 
     class Meta:
         ordering = ['product', 'host', 'protocol', 'port', 'userinfo', 'path', 'query', 'fragment']
@@ -1600,7 +1731,17 @@ class Endpoint(models.Model):
 
     def __eq__(self, other):
         if isinstance(other, Endpoint):
-            return str(self) == str(other)
+            # Check if the contents of the endpoint match
+            contents_match = str(self) == str(other)
+            # Determine if products should be used in the equation
+            if self.product is not None and other.product is not None:
+                # Check if the products are the same
+                products_match = (self.product) == other.product
+                # Check if the contents match
+                return products_match and contents_match
+            else:
+                return contents_match
+
         else:
             return NotImplemented
 
@@ -1629,20 +1770,39 @@ class Endpoint(models.Model):
         return self.findings.all().count()
 
     def active_findings(self):
-        findings = self.findings.filter(active=True,
-                                      out_of_scope=False,
-                                      mitigated__isnull=True,
-                                      false_p=False,
-                                      duplicate=False,
-                                      status_finding__mitigated=False,
-                                      status_finding__false_positive=False,
-                                      status_finding__out_of_scope=False,
-                                      status_finding__risk_accepted=False).order_by('numerical_severity')
+        findings = self.findings.filter(
+            active=True,
+            out_of_scope=False,
+            mitigated__isnull=True,
+            false_p=False,
+            duplicate=False,
+            status_finding__false_positive=False,
+            status_finding__out_of_scope=False,
+            status_finding__risk_accepted=False
+        ).order_by('numerical_severity')
+        return findings
+
+    def active_verified_findings(self):
+        findings = self.findings.filter(
+            active=True,
+            verified=True,
+            out_of_scope=False,
+            mitigated__isnull=True,
+            false_p=False,
+            duplicate=False,
+            status_finding__false_positive=False,
+            status_finding__out_of_scope=False,
+            status_finding__risk_accepted=False
+        ).order_by('numerical_severity')
         return findings
 
     @property
     def active_findings_count(self):
         return self.active_findings().count()
+
+    @property
+    def active_verified_findings_count(self):
+        return self.active_verified_findings().count()
 
     def host_endpoints(self):
         return Endpoint.objects.filter(host=self.host,
@@ -1678,21 +1838,41 @@ class Endpoint(models.Model):
         return self.host_findings().count()
 
     def host_active_findings(self):
-        findings = Finding.objects.filter(active=True,
-                                        out_of_scope=False,
-                                        mitigated__isnull=True,
-                                        false_p=False,
-                                        duplicate=False,
-                                        status_finding__mitigated=False,
-                                        status_finding__false_positive=False,
-                                        status_finding__out_of_scope=False,
-                                        status_finding__risk_accepted=False,
-                                        endpoints__in=self.host_endpoints()).order_by('numerical_severity')
+        findings = Finding.objects.filter(
+            active=True,
+            out_of_scope=False,
+            mitigated__isnull=True,
+            false_p=False,
+            duplicate=False,
+            status_finding__false_positive=False,
+            status_finding__out_of_scope=False,
+            status_finding__risk_accepted=False,
+            endpoints__in=self.host_endpoints()
+        ).order_by('numerical_severity')
+        return findings
+
+    def host_active_verified_findings(self):
+        findings = Finding.objects.filter(
+            active=True,
+            verified=True,
+            out_of_scope=False,
+            mitigated__isnull=True,
+            false_p=False,
+            duplicate=False,
+            status_finding__false_positive=False,
+            status_finding__out_of_scope=False,
+            status_finding__risk_accepted=False,
+            endpoints__in=self.host_endpoints()
+        ).order_by('numerical_severity')
         return findings
 
     @property
     def host_active_findings_count(self):
         return self.host_active_findings().count()
+
+    @property
+    def host_active_verified_findings_count(self):
+        return self.host_active_verified_findings().count()
 
     def get_breadcrumbs(self):
         bc = self.product.get_breadcrumbs()
@@ -1704,6 +1884,9 @@ class Endpoint(models.Model):
     def from_uri(uri):
         try:
             url = hyperlink.parse(url=uri)
+        except UnicodeDecodeError:
+            from urllib.parse import urlparse
+            url = hyperlink.parse(url="//" + urlparse(uri).netloc)
         except hyperlink.URLParseError as e:
             raise ValidationError('Invalid URL format: {}'.format(e))
 
@@ -1736,6 +1919,11 @@ class Endpoint(models.Model):
     def get_absolute_url(self):
         from django.urls import reverse
         return reverse('view_endpoint', args=[str(self.id)])
+
+    def inherit_tags(self, potentially_existing_tags):
+        # get a copy of the tags to be inherited
+        incoming_inherited_tags = [tag.name for tag in self.product.tags.all()]
+        _manage_inherited_tags(self, incoming_inherited_tags, potentially_existing_tags=potentially_existing_tags)
 
 
 class Development_Environment(models.Model):
@@ -1792,6 +1980,7 @@ class Test(models.Model):
     created = models.DateTimeField(auto_now_add=True, null=True)
 
     tags = TagField(blank=True, force_lowercase=True, help_text=_("Add tags that help describe this test. Choose from the list or add new tags. Press Enter key to add."))
+    inherited_tags = TagField(blank=True, force_lowercase=True, help_text=_("Internal use tags sepcifically for maintaining parity with product. This field will be present as a subset in the tags field"))
 
     version = models.CharField(max_length=100, null=True, blank=True)
 
@@ -1923,6 +2112,11 @@ class Test(models.Model):
         """ Queries the database, no prefetching, so could be slow for lists of model instances """
         return _get_statistics_for_queryset(Finding.objects.filter(test=self), _get_annotations_for_statistics)
 
+    def inherit_tags(self, potentially_existing_tags):
+        # get a copy of the tags to be inherited
+        incoming_inherited_tags = [tag.name for tag in self.engagement.product.tags.all()]
+        _manage_inherited_tags(self, incoming_inherited_tags, potentially_existing_tags=potentially_existing_tags)
+
 
 class Test_Import(TimeStampedModel):
 
@@ -1986,20 +2180,22 @@ class Test_Import_Finding_Action(TimeStampedModel):
 
 
 class Finding(models.Model):
-
     title = models.CharField(max_length=511,
                              verbose_name=_('Title'),
                              help_text=_("A short description of the flaw."))
     date = models.DateField(default=get_current_date,
                             verbose_name=_('Date'),
                             help_text=_("The date the flaw was discovered."))
-
     sla_start_date = models.DateField(
                             blank=True,
                             null=True,
                             verbose_name=_('SLA Start Date'),
                             help_text=_("(readonly)The date used as start date for SLA calculation. Set by expiring risk acceptances. Empty by default, causing a fallback to 'date'."))
-
+    sla_expiration_date = models.DateField(
+                            blank=True,
+                            null=True,
+                            verbose_name=_('SLA Expiration Date'),
+                            help_text=_("(readonly)The date SLA expires for this finding. Empty by default, causing a fallback to 'date'."))
     cwe = models.IntegerField(default=0, null=True, blank=True,
                               verbose_name=_("CWE"),
                               help_text=_("The CWE number associated with this flaw."))
@@ -2197,7 +2393,7 @@ class Finding(models.Model):
                                  help_text=_('Identified file(s) containing the flaw.'))
     component_name = models.CharField(null=True,
                                       blank=True,
-                                      max_length=200,
+                                      max_length=500,
                                       verbose_name=_('Component name'),
                                       help_text=_('Name of the affected component (library name, part of a system, ...).'))
     component_version = models.CharField(null=True,
@@ -2283,7 +2479,20 @@ class Finding(models.Model):
                                                 verbose_name=_('Planned Remediation Date'),
                                                 help_text=_("The date the flaw is expected to be remediated."))
 
+    planned_remediation_version = models.CharField(null=True,
+                                        blank=True,
+                                        max_length=99,
+                                        verbose_name=_('Planned remediation version'),
+                                        help_text=_('The target version when the vulnerability should be fixed / remediated'))
+
+    effort_for_fixing = models.CharField(null=True,
+                                blank=True,
+                                max_length=99,
+                                verbose_name=_('Effort for fixing'),
+                                help_text=_('Effort for fixing / remediating the vulnerability (Low, Medium, High)'))
+
     tags = TagField(blank=True, force_lowercase=True, help_text=_("Add tags that help describe this finding. Choose from the list or add new tags. Press Enter key to add."))
+    inherited_tags = TagField(blank=True, force_lowercase=True, help_text=_("Internal use tags sepcifically for maintaining parity with product. This field will be present as a subset in the tags field"))
 
     SEVERITIES = {'Info': 4, 'Low': 3, 'Medium': 2,
                   'High': 1, 'Critical': 0}
@@ -2415,7 +2624,7 @@ class Finding(models.Model):
 
         # Make sure that we have a cwe if we need one
         if self.cwe == 0 and not self.test.hash_code_allows_null_cwe:
-            deduplicationLogger.warn(
+            deduplicationLogger.warning(
                 "Cannot compute hash_code based on configured fields because cwe is 0 for finding of title '" + self.title + "' found in file '" + str(self.file_path) +
                 "'. Fallback to legacy mode for this finding.")
             return self.compute_hash_code_legacy()
@@ -2613,14 +2822,28 @@ class Finding(models.Model):
         return ", ".join([str(s) for s in status])
 
     def _age(self, start_date):
-        if SLA_BUSINESS_DAYS:
+        from dateutil.parser import parse
+        if start_date and isinstance(start_date, str):
+            start_date = parse(start_date).date()
+
+        from dojo.utils import get_work_days
+        if settings.SLA_BUSINESS_DAYS:
             if self.mitigated:
-                days = busday_count(self.date, self.mitigated.date())
+                mitigated_date = self.mitigated
+                if isinstance(mitigated_date, datetime):
+                    mitigated_date = self.mitigated.date()
+                days = get_work_days(self.date, mitigated_date)
             else:
-                days = busday_count(self.date, get_current_date())
+                days = get_work_days(self.date, get_current_date())
         else:
+            if isinstance(start_date, datetime):
+                start_date = start_date.date()
+
             if self.mitigated:
-                diff = self.mitigated.date() - start_date
+                mitigated_date = self.mitigated
+                if isinstance(mitigated_date, datetime):
+                    mitigated_date = self.mitigated.date()
+                diff = mitigated_date - start_date
             else:
                 diff = get_current_date() - start_date
             days = diff.days
@@ -2630,9 +2853,9 @@ class Finding(models.Model):
     def age(self):
         return self._age(self.date)
 
-    def get_sla_periods(self):
-        sla_configuration = SLA_Configuration.objects.filter(id=self.test.engagement.product.sla_configuration_id).first()
-        return sla_configuration
+    @property
+    def sla_age(self):
+        return self._age(self.get_sla_start_date())
 
     def get_sla_start_date(self):
         if self.sla_start_date:
@@ -2640,21 +2863,41 @@ class Finding(models.Model):
         else:
             return self.date
 
-    @property
-    def sla_age(self):
-        return self._age(self.get_sla_start_date())
+    def get_sla_period(self):
+        sla_configuration = SLA_Configuration.objects.filter(id=self.test.engagement.product.sla_configuration_id).first()
+        return getattr(sla_configuration, self.severity.lower(), None)
+
+    def set_sla_expiration_date(self):
+        system_settings = System_Settings.objects.get()
+        if not system_settings.enable_finding_sla:
+            return None
+
+        days_remaining = None
+        sla_period = self.get_sla_period()
+        if sla_period:
+            days_remaining = sla_period - self.sla_age
+
+        if days_remaining:
+            if self.mitigated:
+                mitigated_date = self.mitigated
+                if isinstance(mitigated_date, datetime):
+                    mitigated_date = self.mitigated.date()
+                self.sla_expiration_date = mitigated_date + relativedelta(days=days_remaining)
+            else:
+                self.sla_expiration_date = get_current_date() + relativedelta(days=days_remaining)
 
     def sla_days_remaining(self):
         sla_calculation = None
-        sla_periods = self.get_sla_periods()
-        sla_age = getattr(sla_periods, self.severity.lower(), None)
-        if sla_age:
-            sla_calculation = sla_age - self.sla_age
+        sla_period = self.get_sla_period()
+        if sla_period:
+            sla_calculation = sla_period - self.sla_age
         return sla_calculation
 
     def sla_deadline(self):
         days_remaining = self.sla_days_remaining()
         if days_remaining:
+            if self.mitigated:
+                return self.mitigated.date() + relativedelta(days=days_remaining)
             return get_current_date() + relativedelta(days=days_remaining)
         return None
 
@@ -2666,7 +2909,8 @@ class Finding(models.Model):
 
     def has_github_issue(self):
         try:
-            issue = self.github_issue
+            # Attempt to access the github issue if it exists. If not, an exception will be caught
+            _ = self.github_issue
             return True
         except GITHUB_Issue.DoesNotExist:
             return False
@@ -2717,10 +2961,10 @@ class Finding(models.Model):
         return self.finding_group is not None
 
     def save_no_options(self, *args, **kwargs):
-        return self.save(dedupe_option=False, false_history=False, rules_option=False, product_grading_option=False,
+        return self.save(dedupe_option=False, rules_option=False, product_grading_option=False,
              issue_updater_option=False, push_to_jira=False, user=None, *args, **kwargs)
 
-    def save(self, dedupe_option=True, false_history=False, rules_option=True, product_grading_option=True,
+    def save(self, dedupe_option=True, rules_option=True, product_grading_option=True,
              issue_updater_option=True, push_to_jira=False, user=None, *args, **kwargs):
 
         from dojo.finding import helper as finding_helper
@@ -2745,10 +2989,6 @@ class Finding(models.Model):
             except Exception as ex:
                 logger.error("Can't compute cvssv3 score for finding id %i. Invalid cvssv3 vector found: '%s'. Exception: %s", self.id, self.cvssv3, ex)
 
-        if rules_option:
-            from dojo.utils import do_apply_rules
-            do_apply_rules(self, *args, **kwargs)
-
         # Finding.save is called once from serializers.py with dedupe_option=False because the finding is not ready yet, for example the endpoints are not built
         # It is then called a second time with dedupe_option defaulted to true; now we can compute the hash_code and run the deduplication
         if dedupe_option:
@@ -2760,7 +3000,6 @@ class Finding(models.Model):
 
         if self.pk is None:
             # We enter here during the first call from serializers.py
-            false_history = True
             from dojo.utils import apply_cwe_to_template
             self = apply_cwe_to_template(self)
 
@@ -2783,14 +3022,17 @@ class Finding(models.Model):
             elif (self.file_path is not None):
                 self.static_finding = True
 
+        # update the SLA expiration date last, after all other finding fields have been updated
+        self.set_sla_expiration_date()
+
         logger.debug("Saving finding of id " + str(self.id) + " dedupe_option:" + str(dedupe_option) + " (self.pk is %s)", "None" if self.pk is None else "not None")
         super(Finding, self).save(*args, **kwargs)
 
         self.found_by.add(self.test.test_type)
 
         # only perform post processing (in celery task) if needed. this check avoids submitting 1000s of tasks to celery that will do nothing
-        if dedupe_option or false_history or issue_updater_option or product_grading_option or push_to_jira:
-            finding_helper.post_process_finding_save(self, dedupe_option=dedupe_option, false_history=false_history, rules_option=rules_option, product_grading_option=product_grading_option,
+        if dedupe_option or issue_updater_option or product_grading_option or push_to_jira:
+            finding_helper.post_process_finding_save(self, dedupe_option=dedupe_option, rules_option=rules_option, product_grading_option=product_grading_option,
                 issue_updater_option=issue_updater_option, push_to_jira=push_to_jira, user=user, *args, **kwargs)
         else:
             logger.debug('no options selected that require finding post processing')
@@ -2817,20 +3059,41 @@ class Finding(models.Model):
                 'url': reverse('view_finding', args=(self.id,))}]
         return bc
 
+    def get_valid_request_response_pairs(self):
+        empty_value = base64.b64encode("".encode())
+        # Get a list of all req/resp pairs
+        all_req_resps = self.burprawrequestresponse_set.all()
+        # Filter away those that do not have any contents
+        valid_req_resps = all_req_resps.exclude(
+            burpRequestBase64__exact=empty_value,
+            burpResponseBase64__exact=empty_value,
+        )
+
+        return valid_req_resps
+
     def get_report_requests(self):
-        if self.burprawrequestresponse_set.count() >= 3:
-            return self.burprawrequestresponse_set.all()[0:3]
-        elif self.burprawrequestresponse_set.count() > 0:
-            return self.burprawrequestresponse_set.all()
+        # Get the list of request response pairs that are non empty
+        request_response_pairs = self.get_valid_request_response_pairs()
+        # Determine how many to return
+        if request_response_pairs.count() >= 3:
+            return request_response_pairs[0:3]
+        elif request_response_pairs.count() > 0:
+            return request_response_pairs
 
     def get_request(self):
-        if self.burprawrequestresponse_set.count() > 0:
-            reqres = self.burprawrequestresponse_set().first()
+        # Get the list of request response pairs that are non empty
+        request_response_pairs = self.get_valid_request_response_pairs()
+        # Determine what to return
+        if request_response_pairs.count() > 0:
+            reqres = request_response_pairs.first()
         return base64.b64decode(reqres.burpRequestBase64)
 
     def get_response(self):
-        if self.burprawrequestresponse_set.count() > 0:
-            reqres = self.burprawrequestresponse_set.first()
+        # Get the list of request response pairs that are non empty
+        request_response_pairs = self.get_valid_request_response_pairs()
+        # Determine what to return
+        if request_response_pairs.count() > 0:
+            reqres = request_response_pairs.first()
         res = base64.b64decode(reqres.burpResponseBase64)
         # Removes all blank lines
         res = re.sub(r'\n\s*\n', '\n', res)
@@ -2863,26 +3126,125 @@ class Finding(models.Model):
         link = self.get_file_path_with_raw_link()
         return create_bleached_link(link, self.file_path)
 
+    def get_scm_type(self):
+        # extract scm type from product custom field 'scm-type'
+
+        if hasattr(self.test.engagement, 'product'):
+            dojo_meta = DojoMeta.objects.filter(product=self.test.engagement.product, name='scm-type').first()
+            if dojo_meta:
+                st = dojo_meta.value.strip()
+                if st:
+                    return st.lower()
+        return 'github'
+
+    def bitbucket_public_prepare_scm_base_link(self, uri):
+        # bitbucket public (https://bitbucket.org) url template for browse is:
+        # https://bitbucket.org/<username>/<repository-slug>
+        # but when you get repo url for git, its template is:
+        # https://bitbucket.org/<username>/<repository-slug>.git
+        # so to create browser url - git url should be recomposed like below:
+
+        parts_uri = uri.split('.git')
+        return parts_uri[0]
+
+    def bitbucket_public_prepare_scm_link(self, uri):
+        # if commit hash or branch/tag is set for engagement/test -
+        # hash or branch/tag should be appended to base browser link
+
+        link = self.bitbucket_public_prepare_scm_base_link(uri)
+        if self.test.commit_hash:
+            link += '/src/' + self.test.commit_hash + '/' + self.file_path
+        elif self.test.engagement.commit_hash:
+            link += '/src/' + self.test.engagement.commit_hash + '/' + self.file_path
+        elif self.test.branch_tag:
+            link += '/src/' + self.test.branch_tag + '/' + self.file_path
+        elif self.test.engagement.branch_tag:
+            link += '/src/' + self.test.engagement.branch_tag + '/' + self.file_path
+        else:
+            link += '/src/master/' + self.file_path
+
+        return link
+
+    def bitbucket_standalone_prepare_scm_base_link(self, uri):
+        # bitbucket onpremise/standalone url template for browse is:
+        # https://bb.example.com/projects/<project-key>/repos/<repository-slug>
+        # but when you get repo url for git, its template is:
+        # https://bb.example.com/scm/<project-key>/<repository-slug>.git
+        # or for user public repo^
+        # https://bb.example.com/users/<username>/repos/<repository-slug>
+        # but when you get repo url for git, its template is:
+        # https://bb.example.com/scm/<username>/<repository-slug>.git (username often could be prefixed with ~)
+        # so to create borwser url - git url should be recomposed like below:
+
+        parts_uri = uri.split('.git')
+        parts_scm = parts_uri[0].split('/scm/')
+        parts_project = parts_scm[1].split('/')
+        project = parts_project[0]
+        if project.startswith('~'):
+            return parts_scm[0] + '/users/' + parts_project[0][1:] + '/repos/' + parts_project[1] + '/browse'
+        else:
+            return parts_scm[0] + '/projects/' + parts_project[0] + '/repos/' + parts_project[1] + '/browse'
+
+    def bitbucket_standalone_prepare_scm_link(self, uri):
+        # if commit hash or branch/tag is set for engagement/test -
+        # hash or barnch/tag should be appended to base browser link
+
+        link = self.bitbucket_standalone_prepare_scm_base_link(uri)
+        if self.test.commit_hash:
+            link += '/' + self.file_path + '?at=' + self.test.commit_hash
+        elif self.test.engagement.commit_hash:
+            link += '/' + self.file_path + '?at=' + self.test.engagement.commit_hash
+        elif self.test.branch_tag:
+            link += '/' + self.file_path + '?at=' + self.test.branch_tag
+        elif self.test.engagement.branch_tag:
+            link += '/' + self.file_path + '?at=' + self.test.engagement.branch_tag
+        else:
+            link += '/' + self.file_path
+
+        return link
+
+    def github_prepare_scm_link(self, uri):
+        link = uri
+
+        if self.test.commit_hash:
+            link += '/blob/' + self.test.commit_hash + '/' + self.file_path
+        elif self.test.engagement.commit_hash:
+            link += '/blob/' + self.test.engagement.commit_hash + '/' + self.file_path
+        elif self.test.branch_tag:
+            link += '/blob/' + self.test.branch_tag + '/' + self.file_path
+        elif self.test.engagement.branch_tag:
+            link += '/blob/' + self.test.engagement.branch_tag + '/' + self.file_path
+        else:
+            link += '/' + self.file_path
+
+        return link
+
     def get_file_path_with_raw_link(self):
         if self.file_path is None:
             return None
+
         link = self.test.engagement.source_code_management_uri
-        if (self.test.engagement.source_code_management_uri is not None
-                and "https://github.com/" in self.test.engagement.source_code_management_uri):
-            if self.test.commit_hash:
-                link += '/blob/' + self.test.commit_hash + '/' + self.file_path
-            elif self.test.engagement.commit_hash:
-                link += '/blob/' + self.test.engagement.commit_hash + '/' + self.file_path
-            elif self.test.branch_tag:
-                link += '/blob/' + self.test.branch_tag + '/' + self.file_path
-            elif self.test.engagement.branch_tag:
-                link += '/blob/' + self.test.engagement.branch_tag + '/' + self.file_path
+        scm_type = self.get_scm_type()
+        if (self.test.engagement.source_code_management_uri is not None):
+            if scm_type == 'github' or ("https://github.com/" in self.test.engagement.source_code_management_uri):
+                link = self.github_prepare_scm_link(link)
+            elif scm_type == 'bitbucket-standalone':
+                link = self.bitbucket_standalone_prepare_scm_link(link)
+            elif scm_type == 'bitbucket':
+                link = self.bitbucket_public_prepare_scm_link(link)
             else:
                 link += '/' + self.file_path
         else:
             link += '/' + self.file_path
+
+        # than - add line part to browser url
         if self.line:
-            link = link + '#L' + str(self.line)
+            if scm_type == 'github' or scm_type == 'gitlab':
+                link = link + '#L' + str(self.line)
+            elif scm_type == 'bitbucket-standalone':
+                link = link + '#' + str(self.line)
+            elif scm_type == 'bitbucket':
+                link = link + '#lines-' + str(self.line)
         return link
 
     def get_references_with_links(self):
@@ -2924,6 +3286,16 @@ class Finding(models.Model):
         vulnerability_ids = list(dict.fromkeys(vulnerability_ids))
 
         return vulnerability_ids
+
+    def inherit_tags(self, potentially_existing_tags):
+        # get a copy of the tags to be inherited
+        incoming_inherited_tags = [tag.name for tag in self.test.engagement.product.tags.all()]
+        _manage_inherited_tags(self, incoming_inherited_tags, potentially_existing_tags=potentially_existing_tags)
+
+    @property
+    def violates_sla(self):
+        days_remaining = self.sla_days_remaining()
+        return days_remaining < 0 if days_remaining else False
 
 
 class FindingAdmin(admin.ModelAdmin):
@@ -3328,9 +3700,14 @@ class Announcement(models.Model):
     message = models.CharField(max_length=500,
                                 help_text=_("This dismissable message will be displayed on all pages for authenticated users. It can contain basic html tags, for example <a href='https://www.fred.com' style='color: #337ab7;' target='_blank'>https://example.com</a>"),
                                 default='')
-    dismissable = models.BooleanField(default=False, null=True, blank=True)
     style = models.CharField(max_length=64, choices=ANNOUNCEMENT_STYLE_CHOICES, default='info',
                             help_text=_("The style of banner to display. (info, success, warning, danger)"))
+    dismissable = models.BooleanField(default=False,
+                                      null=False,
+                                      blank=True,
+                                      verbose_name=_('Dismissable?'),
+                                      help_text=_('Ticking this box allows users to dismiss the current announcement'),
+                                      )
 
 
 class UserAnnouncement(models.Model):
@@ -3555,14 +3932,14 @@ class JIRA_Issue(models.Model):
                                        help_text=_("The date the linked Jira issue was last modified."))
 
     def set_obj(self, obj):
-        if type(obj) == Finding:
+        if isinstance(obj, Finding):
             self.finding = obj
-        elif type(obj) == Finding_Group:
+        elif isinstance(obj, Finding_Group):
             self.finding_group = obj
-        elif type(obj) == Engagement:
+        elif isinstance(obj, Engagement):
             self.engagement = obj
         else:
-            raise ValueError('unknown objec type whiel creating JIRA_Issue: %s' % to_str_typed(obj))
+            raise ValueError('unknown object type while creating JIRA_Issue: %s' % to_str_typed(obj))
 
     def __str__(self):
         text = ""
@@ -3573,12 +3950,19 @@ class JIRA_Issue(models.Model):
         return text + " | Jira Key: " + str(self.jira_key)
 
 
+NOTIFICATION_CHOICE_SLACK = ("slack", "slack")
+NOTIFICATION_CHOICE_MSTEAMS = ("msteams", "msteams")
+NOTIFICATION_CHOICE_MAIL = ("mail", "mail")
+NOTIFICATION_CHOICE_ALERT = ("alert", "alert")
+
 NOTIFICATION_CHOICES = (
-    ("slack", "slack"), ("msteams", "msteams"), ("mail", "mail"),
-    ("alert", "alert")
+    NOTIFICATION_CHOICE_SLACK,
+    NOTIFICATION_CHOICE_MSTEAMS,
+    NOTIFICATION_CHOICE_MAIL,
+    NOTIFICATION_CHOICE_ALERT,
 )
 
-DEFAULT_NOTIFICATION = ("alert", "alert")
+DEFAULT_NOTIFICATION = NOTIFICATION_CHOICE_ALERT
 
 
 class Notifications(models.Model):
@@ -3588,6 +3972,7 @@ class Notifications(models.Model):
     test_added = MultiSelectField(choices=NOTIFICATION_CHOICES, default=DEFAULT_NOTIFICATION, blank=True)
 
     scan_added = MultiSelectField(choices=NOTIFICATION_CHOICES, default=DEFAULT_NOTIFICATION, blank=True, help_text=_('Triggered whenever an (re-)import has been done that created/updated/closed findings.'))
+    scan_added_empty = MultiSelectField(choices=NOTIFICATION_CHOICES, default=[], blank=True, help_text=_('Triggered whenever an (re-)import has been done (even if that created/updated/closed no findings).'))
     jira_update = MultiSelectField(choices=NOTIFICATION_CHOICES, default=DEFAULT_NOTIFICATION, blank=True, verbose_name=_("JIRA problems"), help_text=_("JIRA sync happens in the background, errors will be shown as notifications/alerts so make sure to subscribe"))
     upcoming_engagement = MultiSelectField(choices=NOTIFICATION_CHOICES, default=DEFAULT_NOTIFICATION, blank=True)
     stale_engagement = MultiSelectField(choices=NOTIFICATION_CHOICES, default=DEFAULT_NOTIFICATION, blank=True)
@@ -3603,9 +3988,12 @@ class Notifications(models.Model):
     sla_breach = MultiSelectField(choices=NOTIFICATION_CHOICES, default=DEFAULT_NOTIFICATION, blank=True,
         verbose_name=_('SLA breach'),
         help_text=_('Get notified of (upcoming) SLA breaches'))
-    risk_acceptance_expiration = MultiSelectField(choices=NOTIFICATION_CHOICES, default='alert', blank=True,
+    risk_acceptance_expiration = MultiSelectField(choices=NOTIFICATION_CHOICES, default=DEFAULT_NOTIFICATION, blank=True,
         verbose_name=_('Risk Acceptance Expiration'),
         help_text=_('Get notified of (upcoming) Risk Acceptance expiries'))
+    sla_breach_combined = MultiSelectField(choices=NOTIFICATION_CHOICES, default=DEFAULT_NOTIFICATION, blank=True,
+        verbose_name=_('SLA breach (combined)'),
+        help_text=_('Get notified of (upcoming) SLA breaches (a message per project)'))
 
     class Meta:
         constraints = [
@@ -3645,9 +4033,22 @@ class Notifications(models.Model):
                 result.review_requested = merge_sets_safe(result.review_requested, notifications.review_requested)
                 result.other = merge_sets_safe(result.other, notifications.other)
                 result.sla_breach = merge_sets_safe(result.sla_breach, notifications.sla_breach)
+                result.sla_breach_combined = merge_sets_safe(result.sla_breach_combined, notifications.sla_breach_combined)
                 result.risk_acceptance_expiration = merge_sets_safe(result.risk_acceptance_expiration, notifications.risk_acceptance_expiration)
 
         return result
+
+    def __str__(self):
+        return f"Notifications about {self.product or 'all projects'} for {self.user or 'system notifications'}"
+
+
+class NotificationsAdmin(admin.ModelAdmin):
+    list_filter = ('user', 'product')
+
+    def get_list_display(self, request):
+        list_fields = ['user', 'product']
+        list_fields += [field.name for field in self.model._meta.fields if field.name not in list_fields]
+        return list_fields
 
 
 class Tool_Product_Settings(models.Model):
@@ -3935,77 +4336,6 @@ class Benchmark_Product_Summary(models.Model):
         unique_together = [('product', 'benchmark_type')]
 
 
-# product_opts = [f.name for f in Product._meta.fields]
-# test_opts = [f.name for f in Test._meta.fields]
-# test_type_opts = [f.name for f in Test_Type._meta.fields]
-finding_opts = [f.name for f in Finding._meta.fields if f.name not in ['last_status_update']]
-# endpoint_opts = [f.name for f in Endpoint._meta.fields]
-# engagement_opts = [f.name for f in Engagement._meta.fields]
-# product_type_opts = [f.name for f in Product_Type._meta.fields]
-# single_options = product_opts + test_opts + test_type_opts + finding_opts + \
-#                  endpoint_opts + engagement_opts + product_type_opts
-all_options = []
-for x in finding_opts:
-    all_options.append((x, x))
-operator_options = (('Matches', 'Matches'),
-                    ('Contains', 'Contains'))
-application_options = (('Append', 'Append'),
-                      ('Replace', 'Replace'))
-blank_options = (('', ''),)
-
-
-class Rule(models.Model):
-    # add UI notification to let people know what rules were applied
-
-    name = models.CharField(max_length=200)
-    enabled = models.BooleanField(default=True)
-    text = models.TextField()
-    operator = models.CharField(max_length=30, choices=operator_options)
-    """
-    model_object_options = (('Product', 'Product'),
-                            ('Engagement', 'Engagement'), ('Test', 'Test'),
-                            ('Finding', 'Finding'), ('Endpoint', 'Endpoint'),
-                            ('Product Type', 'Product_Type'), ('Test Type', 'Test_Type'))
-    """
-    model_object_options = (('Finding', 'Finding'),)
-    model_object = models.CharField(max_length=30, choices=model_object_options)
-    match_field = models.CharField(max_length=200, choices=all_options)
-    match_text = models.TextField()
-    application = models.CharField(max_length=200, choices=application_options)
-    applies_to = models.CharField(max_length=30, choices=model_object_options)
-    # TODO: Add or ?
-    # and_rules = models.ManyToManyField('self')
-    applied_field = models.CharField(max_length=200, choices=(all_options))
-    child_rules = models.ManyToManyField('self', editable=False)
-    parent_rule = models.ForeignKey('self', editable=False, null=True, on_delete=models.CASCADE)
-
-
-class Child_Rule(models.Model):
-    # add UI notification to let people know what rules were applied
-    operator = models.CharField(max_length=30, choices=operator_options)
-    """
-    model_object_options = (('Product', 'Product'),
-                            ('Engagement', 'Engagement'), ('Test', 'Test'),
-                            ('Finding', 'Finding'), ('Endpoint', 'Endpoint'),
-                            ('Product Type', 'Product_Type'), ('Test Type', 'Test_Type'))
-    """
-    model_object_options = (('Finding', 'Finding'),)
-    model_object = models.CharField(max_length=30, choices=model_object_options)
-    match_field = models.CharField(max_length=200, choices=all_options)
-    match_text = models.TextField()
-    # TODO: Add or ?
-    # and_rules = models.ManyToManyField('self')
-    parent_rule = models.ForeignKey(Rule, editable=False, null=True, on_delete=models.CASCADE)
-
-
-class FieldRule(models.Model):
-    field = models.CharField(max_length=200)
-    update_options = (('Append', 'Append'),
-                        ('Replace', 'Replace'))
-    update_type = models.CharField(max_length=30, choices=update_options)
-    text = models.CharField(max_length=200)
-
-
 # ==========================
 # Defect Dojo Engaegment Surveys
 # ==============================
@@ -4171,40 +4501,31 @@ class ChoiceAnswer(Answer):
             return 'No Response'
 
 
-def enable_disable_auditlog(enable=True):
-    if enable:
-        # Register for automatic logging to database
-        logger.info('enabling audit logging')
-        auditlog.register(Dojo_User, exclude_fields=['password'])
-        auditlog.register(Endpoint)
-        auditlog.register(Engagement)
-        auditlog.register(Finding)
-        auditlog.register(Product)
-        auditlog.register(Test)
-        auditlog.register(Risk_Acceptance)
-        auditlog.register(Finding_Template)
-        auditlog.register(Cred_User, exclude_fields=['password'])
-    else:
-        logger.info('disabling audit logging')
-        auditlog.unregister(Dojo_User)
-        auditlog.unregister(Endpoint)
-        auditlog.unregister(Engagement)
-        auditlog.unregister(Finding)
-        auditlog.unregister(Product)
-        auditlog.unregister(Test)
-        auditlog.unregister(Risk_Acceptance)
-        auditlog.unregister(Finding_Template)
-        auditlog.unregister(Cred_User)
+if settings.ENABLE_AUDITLOG:
+    # Register for automatic logging to database
+    logger.info('enabling audit logging')
+    auditlog.register(Dojo_User, exclude_fields=['password'])
+    auditlog.register(Endpoint)
+    auditlog.register(Engagement)
+    auditlog.register(Finding)
+    auditlog.register(Product_Type)
+    auditlog.register(Product)
+    auditlog.register(Test)
+    auditlog.register(Risk_Acceptance)
+    auditlog.register(Finding_Template)
+    auditlog.register(Cred_User, exclude_fields=['password'])
 
-
-from dojo.utils import calculate_grade, get_system_setting, to_str_typed
-enable_disable_auditlog(enable=get_system_setting('enable_auditlog'))  # on startup choose safe to retrieve system settiung)
+from dojo.utils import calculate_grade, to_str_typed
 
 tagulous.admin.register(Product.tags)
 tagulous.admin.register(Test.tags)
+tagulous.admin.register(Test.inherited_tags)
 tagulous.admin.register(Finding.tags)
+tagulous.admin.register(Finding.inherited_tags)
 tagulous.admin.register(Engagement.tags)
+tagulous.admin.register(Engagement.inherited_tags)
 tagulous.admin.register(Endpoint.tags)
+tagulous.admin.register(Endpoint.inherited_tags)
 tagulous.admin.register(Finding_Template.tags)
 tagulous.admin.register(App_Analysis.tags)
 tagulous.admin.register(Objects_Product.tags)
@@ -4236,6 +4557,8 @@ admin.site.register(Engagement)
 admin.site.register(Risk_Acceptance)
 admin.site.register(Check_List)
 admin.site.register(Test_Type)
+admin.site.register(Endpoint_Params)
+admin.site.register(Endpoint_Status)
 admin.site.register(Endpoint)
 admin.site.register(Product)
 admin.site.register(Product_Type)
@@ -4247,6 +4570,9 @@ admin.site.register(JIRA_Issue)
 admin.site.register(JIRA_Instance, JIRA_Instance_Admin)
 admin.site.register(JIRA_Project)
 admin.site.register(GITHUB_Conf)
+admin.site.register(GITHUB_Issue)
+admin.site.register(GITHUB_Clone)
+admin.site.register(GITHUB_Details_Cache)
 admin.site.register(GITHUB_PKey)
 admin.site.register(Tool_Configuration, Tool_Configuration_Admin)
 admin.site.register(Tool_Product_Settings)
@@ -4264,3 +4590,30 @@ admin.site.register(Dojo_Group)
 # SonarQube Integration
 admin.site.register(Sonarqube_Issue)
 admin.site.register(Sonarqube_Issue_Transition)
+
+admin.site.register(Dojo_Group_Member)
+admin.site.register(Product_Member)
+admin.site.register(Product_Group)
+admin.site.register(Product_Type_Member)
+admin.site.register(Product_Type_Group)
+
+admin.site.register(Contact)
+admin.site.register(NoteHistory)
+admin.site.register(Product_Line)
+admin.site.register(Report_Type)
+admin.site.register(DojoMeta)
+admin.site.register(Product_API_Scan_Configuration)
+admin.site.register(Development_Environment)
+admin.site.register(Finding_Template)
+admin.site.register(Vulnerability_Id)
+admin.site.register(Vulnerability_Id_Template)
+admin.site.register(BurpRawRequestResponse)
+admin.site.register(Announcement)
+admin.site.register(UserAnnouncement)
+admin.site.register(BannerConf)
+admin.site.register(Notifications, NotificationsAdmin)
+admin.site.register(Tool_Product_History)
+admin.site.register(General_Survey)
+admin.site.register(Test_Import)
+admin.site.register(Test_Import_Finding_Action)
+admin.site.register(Finding_Group)

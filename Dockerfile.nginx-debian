@@ -5,7 +5,7 @@
 # Dockerfile.django-debian to use the caching mechanism of Docker.
 
 # Ref: https://devguide.python.org/#branchstatus
-FROM python:3.11.1-slim-bullseye@sha256:3d260508893319ee271989fe16c0ddf13c710ec5ce1d0708cda7bc30da8389e7 as base
+FROM python:3.11.4-slim-bullseye@sha256:40319d0a897896e746edf877783ef39685d44e90e1e6de8d964d0382df0d4952 as base
 FROM base as build
 WORKDIR /app
 RUN \
@@ -44,8 +44,8 @@ RUN \
   apt-get -y update && \
   apt-get -y install --no-install-recommends apt-transport-https ca-certificates curl wget gnupg && \
   curl -sSL https://deb.nodesource.com/gpgkey/nodesource.gpg.key | apt-key add --no-tty - && \
-  echo 'deb https://deb.nodesource.com/node_14.x bullseye main' > /etc/apt/sources.list.d/nodesource.list && \
-  echo 'deb-src https://deb.nodesource.com/node_14.x bullseye main' >> /etc/apt/sources.list.d/nodesource.list && \
+  echo 'deb https://deb.nodesource.com/node_20.x bullseye main' > /etc/apt/sources.list.d/nodesource.list && \
+  echo 'deb-src https://deb.nodesource.com/node_20.x bullseye main' >> /etc/apt/sources.list.d/nodesource.list && \
   apt-get update -y -o Dir::Etc::sourcelist="sources.list.d/nodesource.list" \
   -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0" && \
   curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - && \
@@ -75,7 +75,7 @@ COPY dojo/ ./dojo/
 
 RUN env DD_SECRET_KEY='.' python3 manage.py collectstatic --noinput && true
 
-FROM nginx:1.23.3-alpine@sha256:659610aadb34b7967dea7686926fdcf08d588a71c5121edb094ce0e4cdbc45e6
+FROM nginx:1.25.3-alpine@sha256:d12e6f7153fae36843aaeed8144c39956698e084e2e898891fa0cc8fe8f6c95c
 ARG uid=1001
 ARG appuser=defectdojo
 COPY --from=collectstatic /app/static/ /usr/share/nginx/html/static/

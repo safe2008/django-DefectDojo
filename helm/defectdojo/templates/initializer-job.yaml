@@ -1,4 +1,4 @@
-{{- if .Values.initializer.run  }}
+{{- if .Values.initializer.run }}
 {{- $fullName := include "defectdojo.fullname" . -}}
 apiVersion: batch/v1
 kind: Job
@@ -22,15 +22,18 @@ spec:
         defectdojo.org/component: initializer
         app.kubernetes.io/name: {{ include "defectdojo.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- if .Values.initializer.labels }}
+        {{- toYaml .Values.initializer.labels | nindent 8 }}
+        {{- end }}
       annotations:
       {{- with .Values.initializer.annotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         checksum/esecret: {{ include (print $.Template.BasePath "/extra-secret.yaml") . | sha256sum }}
     spec:
-    {{- if .Values.admin.ssl }}
+{{- if .Values.admin.ssl }}
       initContainers:
         - name: init-database-cert
           image: busybox
@@ -54,6 +57,17 @@ spec:
       - name: {{ .Values.imagePullSecrets }}
       {{- end }}
       volumes:
+      {{- range .Values.initializer.extraVolumes }}
+      - name: userconfig-{{ .name }}
+        {{ .type }}:
+          {{- if (eq .type "configMap") }}
+          name: {{ .name }}
+          {{- else if (eq .type "secret") }}
+          secretName: {{ .name }}
+          {{- else if (eq .type "hostPath") }}
+          type: {{ .pathType | default "Directory" }}
+          path: {{ .hostPath }}
+          {{- end }}
       - name: run
         emptyDir: {}
       {{- if .Values.admin.ssl }}
@@ -99,17 +113,16 @@ spec:
         {{- if .Values.securityContext.enabled }}
         securityContext:
           {{- toYaml .Values.securityContext.djangoSecurityContext | nindent 10 }}
-        {{- end }}          
+        {{- end }}
+        volumeMounts:
+        {{- range .Values.initializer.extraVolumes }}
+        - name: userconfig-{{ .name }}
+          readOnly: true
+          mountPath: {{ .path }}
+          subPath: {{ .subPath }}
+        {{- end }}
         command:
           - /entrypoint-initializer.sh
-        volumeMounts:
-        - name: run
-          mountPath: /run/defectdojo
-        {{- if .Values.admin.ssl }}
-        - name: local-volume
-          mountPath: "/app/dojo/local"
-          readOnly: true
-        {{- end }}
         envFrom:
         - configMapRef:
             name: {{ $fullName }}

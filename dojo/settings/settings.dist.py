@@ -6,6 +6,9 @@ from dojo import __version__
 import environ
 from netaddr import IPNetwork, IPSet
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 # See https://documentation.defectdojo.com/getting_started/configuration/ for options
 # how to tune the configuration to your needs.
@@ -13,7 +16,7 @@ import json
 root = environ.Path(__file__) - 3  # Three folders back
 
 # reference: https://pypi.org/project/django-environ/
-env = environ.Env(
+env = environ.FileAwareEnv(
     # Set casting and default values
     DD_SITE_URL=(str, 'http://localhost:8080'),
     DD_DEBUG=(bool, False),
@@ -35,6 +38,8 @@ env = environ.Env(
     DD_CSRF_COOKIE_SECURE=(bool, False),
     DD_CSRF_TRUSTED_ORIGINS=(list, []),
     DD_SECURE_CONTENT_TYPE_NOSNIFF=(bool, True),
+    DD_CSRF_COOKIE_SAMESITE=(str, 'Lax'),
+    DD_SESSION_COOKIE_SAMESITE=(str, 'Lax'),
     DD_TIME_ZONE=(str, 'UTC'),
     DD_LANG=(str, 'en-us'),
     DD_TEAM_NAME=(str, 'Security Team'),
@@ -121,7 +126,7 @@ env = environ.Env(
     DD_SOCIAL_AUTH_GITLAB_KEY=(str, ''),
     DD_SOCIAL_AUTH_GITLAB_SECRET=(str, ''),
     DD_SOCIAL_AUTH_GITLAB_API_URL=(str, 'https://gitlab.com'),
-    DD_SOCIAL_AUTH_GITLAB_SCOPE=(list, ['api', 'read_user', 'openid', 'profile', 'email']),
+    DD_SOCIAL_AUTH_GITLAB_SCOPE=(list, ['read_user', 'openid']),
     DD_SOCIAL_AUTH_KEYCLOAK_OAUTH2_ENABLED=(bool, False),
     DD_SOCIAL_AUTH_KEYCLOAK_KEY=(str, ''),
     DD_SOCIAL_AUTH_KEYCLOAK_SECRET=(str, ''),
@@ -169,7 +174,7 @@ env = environ.Env(
     DD_AUTH_REMOTEUSER_GROUPS_HEADER=(str, ''),
     DD_AUTH_REMOTEUSER_GROUPS_CLEANUP=(bool, True),
     # Comma separated list of IP ranges with trusted proxies
-    DD_AUTH_REMOTEUSER_TRUSTED_PROXY=(list, ['127.0.0.0/32']),
+    DD_AUTH_REMOTEUSER_TRUSTED_PROXY=(list, ['127.0.0.1/32']),
     # REMOTE_USER will be processed only on login page. Check https://docs.djangoproject.com/en/3.2/howto/auth-remote-user/#using-remote-user-on-login-pages-only
     DD_AUTH_REMOTEUSER_LOGIN_ONLY=(bool, False),
     # if somebody is using own documentation how to use DefectDojo in his own company
@@ -198,6 +203,8 @@ env = environ.Env(
     DD_JIRA_EXTRA_ISSUE_TYPES=(str, ''),
     # if you want to keep logging to the console but in json format, change this here to 'json_console'
     DD_LOGGING_HANDLER=(str, 'console'),
+    # If true, drf-spectacular will load CSS & JS from default CDN, otherwise from static resources
+    DD_DEFAULT_SWAGGER_UI=(bool, True),
     DD_ALERT_REFRESH=(bool, True),
     DD_DISABLE_ALERT_COUNTER=(bool, False),
     # to disable deleting alerts per user set value to -1
@@ -216,7 +223,8 @@ env = environ.Env(
     DD_EDITABLE_MITIGATED_DATA=(bool, False),
     # new feature that tracks history across multiple reimports for the same test
     DD_TRACK_IMPORT_HISTORY=(bool, True),
-
+    # Delete Auditlogs older than x month; -1 to keep all logs
+    DD_AUDITLOG_FLUSH_RETENTION_PERIOD=(int, -1),
     # Allow grouping of findings in the same test, for example to group findings per dependency
     # DD_FEATURE_FINDING_GROUPS feature is moved to system_settings, will be removed from settings file
     DD_FEATURE_FINDING_GROUPS=(bool, True),
@@ -262,7 +270,15 @@ env = environ.Env(
     # Set fields used by the hashcode generator for deduplication, via en env variable that contains a JSON string
     DD_HASHCODE_FIELDS_PER_SCANNER=(str, ''),
     # Set deduplication algorithms per parser, via en env variable that contains a JSON string
-    DD_DEDUPLICATION_ALGORITHM_PER_PARSER=(str, '')
+    DD_DEDUPLICATION_ALGORITHM_PER_PARSER=(str, ''),
+    # Dictates whether cloud banner is created or not
+    DD_CREATE_CLOUD_BANNER=(bool, True),
+    # With this setting turned on, Dojo maintains an audit log of changes made to entities (Findings, Tests, Engagements, Procuts, ...)
+    # If you run big import you may want to disable this because the way django-auditlog currently works, there's
+    # a big performance hit. Especially during (re-)imports.
+    DD_ENABLE_AUDITLOG=(bool, True),
+    # Specifies whether the "first seen" date of a given report should be used over the "last seen" date
+    DD_USE_FIRST_SEEN=(bool, False),
 )
 
 
@@ -560,6 +576,10 @@ SOCIAL_AUTH_GITLAB_SECRET = env('DD_SOCIAL_AUTH_GITLAB_SECRET')
 SOCIAL_AUTH_GITLAB_API_URL = env('DD_SOCIAL_AUTH_GITLAB_API_URL')
 SOCIAL_AUTH_GITLAB_SCOPE = env('DD_SOCIAL_AUTH_GITLAB_SCOPE')
 
+# Add required scope if auto import is enabled
+if GITLAB_PROJECT_AUTO_IMPORT:
+    SOCIAL_AUTH_GITLAB_SCOPE += ['read_repository']
+
 AUTH0_OAUTH2_ENABLED = env('DD_SOCIAL_AUTH_AUTH0_OAUTH2_ENABLED')
 SOCIAL_AUTH_AUTH0_KEY = env('DD_SOCIAL_AUTH_AUTH0_KEY')
 SOCIAL_AUTH_AUTH0_SECRET = env('DD_SOCIAL_AUTH_AUTH0_SECRET')
@@ -618,7 +638,7 @@ LOGIN_EXEMPT_URLS = (
 
 AUTH_PASSWORD_VALIDATORS = [
     {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
+        'NAME': 'dojo.user.validators.DojoCommonPasswordValidator',
     },
     {
         'NAME': 'dojo.user.validators.MinLengthValidator'
@@ -669,9 +689,11 @@ CSRF_COOKIE_HTTPONLY = env('DD_CSRF_COOKIE_HTTPONLY')
 # the cookie will be marked as secure, which means browsers may ensure that the
 # cookie is only sent with an HTTPS connection.
 SESSION_COOKIE_SECURE = env('DD_SESSION_COOKIE_SECURE')
+SESSION_COOKIE_SAMESITE = env('DD_SESSION_COOKIE_SAMESITE')
 
 # Whether to use a secure cookie for the CSRF cookie.
 CSRF_COOKIE_SECURE = env('DD_CSRF_COOKIE_SECURE')
+CSRF_COOKIE_SAMESITE = env('DD_CSRF_COOKIE_SAMESITE')
 
 # A list of trusted origins for unsafe requests (e.g. POST).
 # Use comma-separated list of domains, they will be split to list automatically
@@ -777,9 +799,11 @@ SPECTACULAR_SETTINGS = {
     'TITLE': 'Defect Dojo API v2',
     'DESCRIPTION': 'Defect Dojo - Open Source vulnerability Management made easy. Prefetch related parameters/responses not yet in the schema.',
     'VERSION': __version__,
+    'SCHEMA_PATH_PREFIX': "/api/v2",
     # OTHER SETTINGS
     # the following set to False could help some client generators
     # 'ENUM_ADD_EXPLICIT_BLANK_NULL_CHOICE': False,
+    'PREPROCESSING_HOOKS': ['dojo.urls.drf_spectacular_preprocessing_filter_spec'],
     'POSTPROCESSING_HOOKS': ['dojo.api_v2.prefetch.schema.prefetch_postprocessing_hook'],
     # show file selection dialogue, see https://github.com/tfranzel/drf-spectacular/issues/455
     "COMPONENT_SPLIT_REQUEST": True,
@@ -787,6 +811,10 @@ SPECTACULAR_SETTINGS = {
         "docExpansion": "none"
     }
 }
+
+if not env('DD_DEFAULT_SWAGGER_UI'):
+    SPECTACULAR_SETTINGS['SWAGGER_UI_DIST'] = 'SIDECAR'
+    SPECTACULAR_SETTINGS['SWAGGER_UI_FAVICON_HREF'] = 'SIDECAR'
 
 # ------------------------------------------------------------------------------
 # TEMPLATES
@@ -842,6 +870,7 @@ INSTALLED_APPS = (
     'social_django',
     'drf_yasg',
     'drf_spectacular',
+    'drf_spectacular_sidecar',  # required for Django collectstatic discovery
     'tagulous',
     'fontawesomefree'
 )
@@ -1047,28 +1076,28 @@ if SAML2_ENABLED:
 # ------------------------------------------------------------------------------
 
 AUTH_REMOTEUSER_ENABLED = env('DD_AUTH_REMOTEUSER_ENABLED')
+AUTH_REMOTEUSER_USERNAME_HEADER = env('DD_AUTH_REMOTEUSER_USERNAME_HEADER')
+AUTH_REMOTEUSER_EMAIL_HEADER = env('DD_AUTH_REMOTEUSER_EMAIL_HEADER')
+AUTH_REMOTEUSER_FIRSTNAME_HEADER = env('DD_AUTH_REMOTEUSER_FIRSTNAME_HEADER')
+AUTH_REMOTEUSER_LASTNAME_HEADER = env('DD_AUTH_REMOTEUSER_LASTNAME_HEADER')
+AUTH_REMOTEUSER_GROUPS_HEADER = env('DD_AUTH_REMOTEUSER_GROUPS_HEADER')
+AUTH_REMOTEUSER_GROUPS_CLEANUP = env('DD_AUTH_REMOTEUSER_GROUPS_CLEANUP')
+
+AUTH_REMOTEUSER_TRUSTED_PROXY = IPSet()
+for ip_range in env('DD_AUTH_REMOTEUSER_TRUSTED_PROXY'):
+    AUTH_REMOTEUSER_TRUSTED_PROXY.add(IPNetwork(ip_range))
+
+if env('DD_AUTH_REMOTEUSER_LOGIN_ONLY'):
+    RemoteUserMiddleware = 'dojo.remote_user.PersistentRemoteUserMiddleware'
+else:
+    RemoteUserMiddleware = 'dojo.remote_user.RemoteUserMiddleware'
+# we need to add middleware just behindAuthenticationMiddleware as described in https://docs.djangoproject.com/en/3.2/howto/auth-remote-user/#configuration
+for i in range(len(MIDDLEWARE)):
+    if MIDDLEWARE[i] == 'django.contrib.auth.middleware.AuthenticationMiddleware':
+        MIDDLEWARE.insert(i + 1, RemoteUserMiddleware)
+        break
+
 if AUTH_REMOTEUSER_ENABLED:
-    AUTH_REMOTEUSER_USERNAME_HEADER = env('DD_AUTH_REMOTEUSER_USERNAME_HEADER')
-    AUTH_REMOTEUSER_EMAIL_HEADER = env('DD_AUTH_REMOTEUSER_EMAIL_HEADER')
-    AUTH_REMOTEUSER_FIRSTNAME_HEADER = env('DD_AUTH_REMOTEUSER_FIRSTNAME_HEADER')
-    AUTH_REMOTEUSER_LASTNAME_HEADER = env('DD_AUTH_REMOTEUSER_LASTNAME_HEADER')
-    AUTH_REMOTEUSER_GROUPS_HEADER = env('DD_AUTH_REMOTEUSER_GROUPS_HEADER')
-    AUTH_REMOTEUSER_GROUPS_CLEANUP = env('DD_AUTH_REMOTEUSER_GROUPS_CLEANUP')
-
-    AUTH_REMOTEUSER_TRUSTED_PROXY = IPSet()
-    for ip_range in env('DD_AUTH_REMOTEUSER_TRUSTED_PROXY'):
-        AUTH_REMOTEUSER_TRUSTED_PROXY.add(IPNetwork(ip_range))
-
-    if env('DD_AUTH_REMOTEUSER_LOGIN_ONLY'):
-        RemoteUserMiddleware = 'dojo.remote_user.PersistentRemoteUserMiddleware'
-    else:
-        RemoteUserMiddleware = 'dojo.remote_user.RemoteUserMiddleware'
-    # we need to add middleware just behindAuthenticationMiddleware as described in https://docs.djangoproject.com/en/3.2/howto/auth-remote-user/#configuration
-    for i in range(len(MIDDLEWARE)):
-        if MIDDLEWARE[i] == 'django.contrib.auth.middleware.AuthenticationMiddleware':
-            MIDDLEWARE.insert(i + 1, RemoteUserMiddleware)
-            break
-
     REST_FRAMEWORK['DEFAULT_AUTHENTICATION_CLASSES'] = \
         ('dojo.remote_user.RemoteUserAuthentication',) + \
         REST_FRAMEWORK['DEFAULT_AUTHENTICATION_CLASSES']
@@ -1123,6 +1152,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'dojo.tasks.async_dupe_delete',
         'schedule': timedelta(minutes=1),
         'args': [timedelta(minutes=1)]
+    },
+    'flush_auditlog': {
+        'task': 'dojo.tasks.flush_auditlog',
+        'schedule': timedelta(hours=8),
     },
     'update-findings-from-source-issues': {
         'task': 'dojo.tools.tool_issue_updater.update_findings_from_source_issues',
@@ -1193,18 +1226,18 @@ HASHCODE_FIELDS_PER_SCANNER = {
     'Cloudsploit Scan': ['title', 'description'],
     'SonarQube Scan': ['cwe', 'severity', 'file_path'],
     'SonarQube API Import': ['title', 'file_path', 'line'],
-    'Dependency Check Scan': ['vulnerability_ids', 'cwe', 'file_path'],
+    'Dependency Check Scan': ['title', 'cwe', 'file_path'],
     'Dockle Scan': ['title', 'description', 'vuln_id_from_tool'],
-    'Dependency Track Finding Packaging Format (FPF) Export': ['component_name', 'component_version', 'vulnerability_ids'],
+    'Dependency Track Finding Packaging Format (FPF) Export': ['component_name', 'component_version', 'vulnerability_ids', 'severity'],
     'Mobsfscan Scan': ['title', 'severity', 'cwe'],
-    'Nessus Scan': ['title', 'severity', 'vulnerability_ids', 'cwe'],
+    'Tenable Scan': ['title', 'severity', 'vulnerability_ids', 'cwe'],
     'Nexpose Scan': ['title', 'severity', 'vulnerability_ids', 'cwe'],
     # possible improvement: in the scanner put the library name into file_path, then dedup on cwe + file_path + severity
     'NPM Audit Scan': ['title', 'severity', 'file_path', 'vulnerability_ids', 'cwe'],
     # possible improvement: in the scanner put the library name into file_path, then dedup on cwe + file_path + severity
     'Yarn Audit Scan': ['title', 'severity', 'file_path', 'vulnerability_ids', 'cwe'],
     # possible improvement: in the scanner put the library name into file_path, then dedup on vulnerability_ids + file_path + severity
-    'Whitesource Scan': ['title', 'severity', 'description'],
+    'Mend Scan': ['title', 'severity', 'description'],
     'ZAP Scan': ['title', 'cwe', 'severity'],
     'Qualys Scan': ['title', 'severity', 'endpoints'],
     # 'Qualys Webapp Scan': ['title', 'unique_id_from_tool'],
@@ -1217,42 +1250,46 @@ HASHCODE_FIELDS_PER_SCANNER = {
     'Acunetix Scan': ['title', 'description'],
     'Acunetix360 Scan': ['title', 'description'],
     'Terrascan Scan': ['vuln_id_from_tool', 'title', 'severity', 'file_path', 'line', 'component_name'],
-    'Trivy Scan': ['title', 'severity', 'vulnerability_ids', 'cwe'],
+    'Trivy Operator Scan': ['title', 'severity', 'vulnerability_ids'],
+    'Trivy Scan': ['title', 'severity', 'vulnerability_ids', 'cwe', 'description'],
     'TFSec Scan': ['severity', 'vuln_id_from_tool', 'file_path', 'line'],
     'Snyk Scan': ['vuln_id_from_tool', 'file_path', 'component_name', 'component_version'],
     'GitLab Dependency Scanning Report': ['title', 'vulnerability_ids', 'file_path', 'component_name', 'component_version'],
     'SpotBugs Scan': ['cwe', 'severity', 'file_path', 'line'],
     'JFrog Xray Unified Scan': ['vulnerability_ids', 'file_path', 'component_name', 'component_version'],
+    'JFrog Xray On Demand Binary Scan': ["title", "component_name", "component_version"],
     'Scout Suite Scan': ['file_path', 'vuln_id_from_tool'],  # for now we use file_path as there is no attribute for "service"
-    'AWS Security Hub Scan': ['unique_id_from_tool'],
     'Meterian Scan': ['cwe', 'component_name', 'component_version', 'description', 'severity'],
     'Github Vulnerability Scan': ['title', 'severity', 'component_name', 'vulnerability_ids', 'file_path'],
-    'Azure Security Center Recommendations Scan': ['unique_id_from_tool'],
     'Solar Appscreener Scan': ['title', 'file_path', 'line', 'severity'],
     'pip-audit Scan': ['vuln_id_from_tool', 'component_name', 'component_version'],
-    'Edgescan Scan': ['unique_id_from_tool'],
-    'Bugcrowd API Import': ['unique_id_from_tool'],
     'Rubocop Scan': ['vuln_id_from_tool', 'file_path', 'line'],
     'JFrog Xray Scan': ['title', 'description', 'component_name', 'component_version'],
     'CycloneDX Scan': ['vuln_id_from_tool', 'component_name', 'component_version'],
     'SSLyze Scan (JSON)': ['title', 'description'],
-    'Harbor Vulnerability Scan': ['title'],
+    'Harbor Vulnerability Scan': ['title', 'mitigation'],
     'Rusty Hog Scan': ['file_path', 'payload'],
     'StackHawk HawkScan': ['vuln_id_from_tool', 'component_name', 'component_version'],
     'Hydra Scan': ['title', 'description'],
     'DrHeader JSON Importer': ['title', 'description'],
-    'PWN SAST': ['title', 'description'],
     'Whispers': ['vuln_id_from_tool', 'file_path', 'line'],
     'Blackduck Hub Scan': ['title', 'vulnerability_ids', 'component_name', 'component_version'],
-    'BlackDuck API': ['unique_id_from_tool'],
-    'docker-bench-security Scan': ['unique_id_from_tool'],
     'Veracode SourceClear Scan': ['title', 'vulnerability_ids', 'component_name', 'component_version', 'severity'],
     'Vulners Scan': ['vuln_id_from_tool', 'component_name'],
     'Twistlock Image Scan': ['title', 'severity', 'component_name', 'component_version'],
     'NeuVector (REST)': ['title', 'severity', 'component_name', 'component_version'],
     'NeuVector (compliance)': ['title', 'vuln_id_from_tool', 'description'],
     'Wpscan': ['title', 'description', 'severity'],
-    'Codechecker Report native': ['unique_id_from_tool'],
+    'Popeye Scan': ['title', 'description'],
+    'Wazuh Scan': ['title'],
+    'Nuclei Scan': ['title', 'cwe', 'severity'],
+    'KubeHunter Scan': ['title', 'description'],
+    'kube-bench Scan': ['title', 'vuln_id_from_tool', 'description'],
+    'Threagile risks report': ['title', 'cwe', "severity"],
+    'Trufflehog Scan': ['title', 'description', 'line'],
+    'Humble Json Importer': ['title'],
+    'MSDefender Parser': ['title', 'description'],
+    'HCLAppScan XML': ['title', 'description'],
 }
 
 # Override the hardcoded settings here via the env var
@@ -1260,8 +1297,12 @@ if len(env('DD_HASHCODE_FIELDS_PER_SCANNER')) > 0:
     env_hashcode_fields_per_scanner = json.loads(env('DD_HASHCODE_FIELDS_PER_SCANNER'))
     for key, value in env_hashcode_fields_per_scanner.items():
         if key in HASHCODE_FIELDS_PER_SCANNER:
-            print("Replacing {} with value {} from env var DD_HASHCODE_FIELDS_PER_SCANNER".format(key, value))
+            logger.info("Replacing {} with value {} (previously set to {}) from env var DD_HASHCODE_FIELDS_PER_SCANNER".format(key, value, HASHCODE_FIELDS_PER_SCANNER[key]))
             HASHCODE_FIELDS_PER_SCANNER[key] = value
+        if key not in HASHCODE_FIELDS_PER_SCANNER:
+            logger.info("Adding {} with value {} from env var DD_HASHCODE_FIELDS_PER_SCANNER".format(key, value))
+            HASHCODE_FIELDS_PER_SCANNER[key] = value
+
 
 # This tells if we should accept cwe=0 when computing hash_code with a configurable list of fields from HASHCODE_FIELDS_PER_SCANNER (this setting doesn't apply to legacy algorithm)
 # If False and cwe = 0, then the hash_code computation will fallback to legacy algorithm for the concerned finding
@@ -1273,22 +1314,24 @@ HASHCODE_ALLOWS_NULL_CWE = {
     'Anchore Enterprise Policy Check': True,
     'Anchore Grype': True,
     'AWS Prowler Scan': True,
+    'AWS Prowler V3': True,
     'Checkmarx Scan': False,
     'Checkmarx OSA': True,
     'Cloudsploit Scan': True,
     'SonarQube Scan': False,
     'Dependency Check Scan': True,
     'Mobsfscan Scan': False,
-    'Nessus Scan': True,
+    'Tenable Scan': True,
     'Nexpose Scan': True,
     'NPM Audit Scan': True,
     'Yarn Audit Scan': True,
-    'Whitesource Scan': True,
+    'Mend Scan': True,
     'ZAP Scan': False,
     'Qualys Scan': True,
     'DSOP Scan': True,
     'Acunetix Scan': True,
     'Acunetix360 Scan': True,
+    'Trivy Operator Scan': True,
     'Trivy Scan': True,
     'SpotBugs Scan': False,
     'Scout Suite Scan': True,
@@ -1306,12 +1349,15 @@ HASHCODE_ALLOWS_NULL_CWE = {
     'Wpscan': True,
     'Rusty Hog Scan': True,
     'Codechecker Report native': True,
+    'Wazuh': True,
+    'Nuclei Scan': True,
+    'Threagile risks report': True
 }
 
 # List of fields that are known to be usable in hash_code computation)
 # 'endpoints' is a pseudo field that uses the endpoints (for dynamic scanners)
 # 'unique_id_from_tool' is often not needed here as it can be used directly in the dedupe algorithm, but it's also possible to use it for hashing
-HASHCODE_ALLOWED_FIELDS = ['title', 'cwe', 'vulnerability_ids', 'line', 'file_path', 'payload', 'component_name', 'component_version', 'description', 'endpoints', 'unique_id_from_tool', 'severity', 'vuln_id_from_tool']
+HASHCODE_ALLOWED_FIELDS = ['title', 'cwe', 'vulnerability_ids', 'line', 'file_path', 'payload', 'component_name', 'component_version', 'description', 'endpoints', 'unique_id_from_tool', 'severity', 'vuln_id_from_tool', 'mitigation']
 
 # Adding fields to the hash_code calculation regardless of the previous settings
 HASH_CODE_FIELDS_ALWAYS = ['service']
@@ -1353,6 +1399,8 @@ DEDUPLICATION_ALGORITHM_PER_PARSER = {
     'Aqua Scan': DEDUPE_ALGO_HASH_CODE,
     'AuditJS Scan': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
     'AWS Prowler Scan': DEDUPE_ALGO_HASH_CODE,
+    'AWS Prowler V3': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
+    "AWS Security Finding Format (ASFF) Scan": DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
     'Burp REST API': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
     'Bandit Scan': DEDUPE_ALGO_HASH_CODE,
     'CargoAudit Scan': DEDUPE_ALGO_HASH_CODE,
@@ -1369,11 +1417,11 @@ DEDUPLICATION_ALGORITHM_PER_PARSER = {
     'SonarQube API Import': DEDUPE_ALGO_HASH_CODE,
     'Dependency Check Scan': DEDUPE_ALGO_HASH_CODE,
     'Dockle Scan': DEDUPE_ALGO_HASH_CODE,
-    'Nessus Scan': DEDUPE_ALGO_HASH_CODE,
+    'Tenable Scan': DEDUPE_ALGO_HASH_CODE,
     'Nexpose Scan': DEDUPE_ALGO_HASH_CODE,
     'NPM Audit Scan': DEDUPE_ALGO_HASH_CODE,
     'Yarn Audit Scan': DEDUPE_ALGO_HASH_CODE,
-    'Whitesource Scan': DEDUPE_ALGO_HASH_CODE,
+    'Mend Scan': DEDUPE_ALGO_HASH_CODE,
     'ZAP Scan': DEDUPE_ALGO_HASH_CODE,
     'Qualys Scan': DEDUPE_ALGO_HASH_CODE,
     'PHP Symfony Security Check': DEDUPE_ALGO_HASH_CODE,
@@ -1388,17 +1436,20 @@ DEDUPLICATION_ALGORITHM_PER_PARSER = {
     'Symfony Security Check': DEDUPE_ALGO_HASH_CODE,
     'DSOP Scan': DEDUPE_ALGO_HASH_CODE,
     'Terrascan Scan': DEDUPE_ALGO_HASH_CODE,
+    'Trivy Operator Scan': DEDUPE_ALGO_HASH_CODE,
     'Trivy Scan': DEDUPE_ALGO_HASH_CODE,
     'TFSec Scan': DEDUPE_ALGO_HASH_CODE,
     'HackerOne Cases': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL_OR_HASH_CODE,
     'Snyk Scan': DEDUPE_ALGO_HASH_CODE,
     'GitLab Dependency Scanning Report': DEDUPE_ALGO_HASH_CODE,
     'GitLab SAST Report': DEDUPE_ALGO_HASH_CODE,
+    'Govulncheck Scanner': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
     'GitLab Container Scan': DEDUPE_ALGO_HASH_CODE,
     'GitLab Secret Detection Report': DEDUPE_ALGO_HASH_CODE,
     'Checkov Scan': DEDUPE_ALGO_HASH_CODE,
     'SpotBugs Scan': DEDUPE_ALGO_HASH_CODE,
     'JFrog Xray Unified Scan': DEDUPE_ALGO_HASH_CODE,
+    'JFrog Xray On Demand Binary Scan': DEDUPE_ALGO_HASH_CODE,
     'Scout Suite Scan': DEDUPE_ALGO_HASH_CODE,
     'AWS Security Hub Scan': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
     'Meterian Scan': DEDUPE_ALGO_HASH_CODE,
@@ -1408,15 +1459,16 @@ DEDUPLICATION_ALGORITHM_PER_PARSER = {
     'SARIF': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL_OR_HASH_CODE,
     'Azure Security Center Recommendations Scan': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
     'Hadolint Dockerfile check': DEDUPE_ALGO_HASH_CODE,
-    'Semgrep JSON Report': DEDUPE_ALGO_HASH_CODE,
+    'Semgrep JSON Report': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL_OR_HASH_CODE,
     'Generic Findings Import': DEDUPE_ALGO_HASH_CODE,
+    'Trufflehog Scan': DEDUPE_ALGO_HASH_CODE,
     'Trufflehog3 Scan': DEDUPE_ALGO_HASH_CODE,
     'Detect-secrets Scan': DEDUPE_ALGO_HASH_CODE,
     'Solar Appscreener Scan': DEDUPE_ALGO_HASH_CODE,
     'Gitleaks Scan': DEDUPE_ALGO_HASH_CODE,
     'pip-audit Scan': DEDUPE_ALGO_HASH_CODE,
-    'Edgescan Scan': DEDUPE_ALGO_HASH_CODE,
-    'Bugcrowd API': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
+    'Edgescan Scan': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
+    'Bugcrowd API Import': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
     'Rubocop Scan': DEDUPE_ALGO_HASH_CODE,
     'JFrog Xray Scan': DEDUPE_ALGO_HASH_CODE,
     'CycloneDX Scan': DEDUPE_ALGO_HASH_CODE,
@@ -1426,17 +1478,25 @@ DEDUPLICATION_ALGORITHM_PER_PARSER = {
     'StackHawk HawkScan': DEDUPE_ALGO_HASH_CODE,
     'Hydra Scan': DEDUPE_ALGO_HASH_CODE,
     'DrHeader JSON Importer': DEDUPE_ALGO_HASH_CODE,
-    'PWN SAST': DEDUPE_ALGO_HASH_CODE,
+    'PWN SAST': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
     'Whispers': DEDUPE_ALGO_HASH_CODE,
     'Blackduck Hub Scan': DEDUPE_ALGO_HASH_CODE,
     'BlackDuck API': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
-    'docker-bench-security Scan': DEDUPE_ALGO_HASH_CODE,
+    'Blackduck Binary Analysis': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
+    'docker-bench-security Scan': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL,
     'Vulners Scan': DEDUPE_ALGO_HASH_CODE,
     'Twistlock Image Scan': DEDUPE_ALGO_HASH_CODE,
     'NeuVector (REST)': DEDUPE_ALGO_HASH_CODE,
     'NeuVector (compliance)': DEDUPE_ALGO_HASH_CODE,
     'Wpscan': DEDUPE_ALGO_HASH_CODE,
-
+    'Popeye Scan': DEDUPE_ALGO_HASH_CODE,
+    'Nuclei Scan': DEDUPE_ALGO_HASH_CODE,
+    'KubeHunter Scan': DEDUPE_ALGO_HASH_CODE,
+    'kube-bench Scan': DEDUPE_ALGO_HASH_CODE,
+    'Threagile risks report': DEDUPE_ALGO_UNIQUE_ID_FROM_TOOL_OR_HASH_CODE,
+    'Humble Json Importer': DEDUPE_ALGO_HASH_CODE,
+    'MSDefender Parser': DEDUPE_ALGO_HASH_CODE,
+    'HCLAppScan XML': DEDUPE_ALGO_HASH_CODE,
 }
 
 # Override the hardcoded settings here via the env var
@@ -1444,7 +1504,10 @@ if len(env('DD_DEDUPLICATION_ALGORITHM_PER_PARSER')) > 0:
     env_dedup_algorithm_per_parser = json.loads(env('DD_DEDUPLICATION_ALGORITHM_PER_PARSER'))
     for key, value in env_dedup_algorithm_per_parser.items():
         if key in DEDUPLICATION_ALGORITHM_PER_PARSER:
-            print("Replacing {} with value {} from env var DD_DEDUPLICATION_ALGORITHM_PER_PARSER".format(key, value))
+            logger.info("Replacing {} with value {} (previously set to {}) from env var DD_DEDUPLICATION_ALGORITHM_PER_PARSER".format(key, value, DEDUPLICATION_ALGORITHM_PER_PARSER[key]))
+            DEDUPLICATION_ALGORITHM_PER_PARSER[key] = value
+        if key not in DEDUPLICATION_ALGORITHM_PER_PARSER:
+            logger.info("Adding {} with value {} from env var DD_DEDUPLICATION_ALGORITHM_PER_PARSER".format(key, value))
             DEDUPLICATION_ALGORITHM_PER_PARSER[key] = value
 
 DUPE_DELETE_MAX_PER_RUN = env('DD_DUPE_DELETE_MAX_PER_RUN')
@@ -1661,3 +1724,12 @@ FILE_UPLOAD_TYPES = env("DD_FILE_UPLOAD_TYPES")
 AUDITLOG_DISABLE_ON_RAW_SAVE = False
 #  You can set extra Jira headers by suppling a dictionary in header: value format (pass as env var like "headr_name=value,another_header=anohter_value")
 ADDITIONAL_HEADERS = env('DD_ADDITIONAL_HEADERS')
+# Dictates whether cloud banner is created or not
+CREATE_CLOUD_BANNER = env('DD_CREATE_CLOUD_BANNER')
+
+# ------------------------------------------------------------------------------
+# Auditlog
+# ------------------------------------------------------------------------------
+AUDITLOG_FLUSH_RETENTION_PERIOD = env('DD_AUDITLOG_FLUSH_RETENTION_PERIOD')
+ENABLE_AUDITLOG = env('DD_ENABLE_AUDITLOG')
+USE_FIRST_SEEN = env('DD_USE_FIRST_SEEN')

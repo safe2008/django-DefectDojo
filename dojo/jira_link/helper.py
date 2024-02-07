@@ -99,7 +99,7 @@ def can_be_pushed_to_jira(obj, form=None):
         # findings or groups already having an existing jira issue can always be pushed
         return True, None, None
 
-    if type(obj) == Finding:
+    if isinstance(obj, Finding):
         if form:
             active = form['active'].value()
             verified = form['verified'].value()
@@ -122,7 +122,7 @@ def can_be_pushed_to_jira(obj, form=None):
             if jira_minimum_threshold and jira_minimum_threshold > Finding.get_number_severity(severity):
                 logger.debug('Finding below the minimum JIRA severity threshold (%s).' % System_Settings.objects.get().jira_minimum_severity)
                 return False, 'Finding below the minimum JIRA severity threshold (%s).' % System_Settings.objects.get().jira_minimum_severity, 'below_minimum_threshold'
-    elif type(obj) == Finding_Group:
+    elif isinstance(obj, Finding_Group):
         if not obj.findings.all():
             return False, '%s cannot be pushed to jira as it is empty.' % to_str_typed(obj), 'error_empty'
         if 'Active' not in obj.status():
@@ -383,8 +383,6 @@ def get_jira_connection_raw(jira_server, jira_username, jira_password):
 
 # Gets a connection to a Jira server based on the finding
 def get_jira_connection(obj):
-    jira = None
-
     jira_instance = obj
     if not isinstance(jira_instance, JIRA_Instance):
         jira_instance = get_jira_instance(obj)
@@ -413,9 +411,14 @@ def jira_transition(jira, issue, transition_id):
             jira.transition_issue(issue, transition_id)
             return True
     except JIRAError as jira_error:
-        logger.debug('error transisioning jira issue ' + issue.key + ' ' + str(jira_error))
+        logger.debug('error transitioning jira issue ' + issue.key + ' ' + str(jira_error))
         logger.exception(jira_error)
-        log_jira_generic_alert('error transitioning jira issue ' + issue.key, str(jira_error))
+        alert_text = "JiraError HTTP %s" % jira_error.status_code
+        if jira_error.url:
+            alert_text += " url: %s" % jira_error.url
+        if jira_error.text:
+            alert_text += "\ntext: %s" % jira_error.text
+        log_jira_generic_alert('error transitioning jira issue ' + issue.key, alert_text)
         return None
 
 
@@ -516,10 +519,10 @@ def get_labels(obj):
             labels.append(prod_name_label)
 
     if system_settings.add_vulnerability_id_to_jira_label or jira_project and jira_project.add_vulnerability_id_to_jira_label:
-        if type(obj) == Finding and obj.vulnerability_ids:
+        if isinstance(obj, Finding) and obj.vulnerability_ids:
             for id in obj.vulnerability_ids:
                 labels.append(id)
-        elif type(obj) == Finding_Group:
+        elif isinstance(obj, Finding_Group):
             for finding in obj.findings.all():
                 for id in finding.vulnerability_ids:
                     labels.append(id)
@@ -534,17 +537,23 @@ def get_tags(obj):
         obj_tags = obj.tags.all()
         if obj_tags:
             for tag in obj_tags:
-                tags.append(str(tag.name))
+                tags.append(str(tag.name.replace(' ', '-')))
+    if isinstance(obj, Finding_Group):
+        for finding in obj.findings.all():
+            obj_tags = finding.tags.all()
+            if obj_tags:
+                for tag in obj_tags:
+                    if tag not in tags:
+                        tags.append(str(tag.name.replace(' ', '-')))
+
     return tags
 
 
 def jira_summary(obj):
     summary = ''
-
-    if type(obj) == Finding:
+    if isinstance(obj, Finding):
         summary = obj.title
-
-    if type(obj) == Finding_Group:
+    if isinstance(obj, Finding_Group):
         summary = obj.name
 
     return summary.replace('\r', '').replace('\n', '')[:255]
@@ -571,9 +580,9 @@ def jira_priority(obj):
 
 
 def jira_environment(obj):
-    if type(obj) == Finding:
+    if isinstance(obj, Finding):
         return "\n".join([str(endpoint) for endpoint in obj.endpoints.all()])
-    elif type(obj) == Finding_Group:
+    elif isinstance(obj, Finding_Group):
         return "\n".join([jira_environment(finding) for finding in obj.findings.all()])
     else:
         return ''
@@ -647,6 +656,7 @@ def prepare_jira_issue_fields(
         environment=None,
         priority_name=None,
         epic_name_field=None,
+        default_assignee=None,
         duedate=None,
         issuetype_fields=[]):
 
@@ -678,6 +688,9 @@ def prepare_jira_issue_fields(
     if duedate and 'duedate' in issuetype_fields:
         fields['duedate'] = duedate.strftime('%Y-%m-%d')
 
+    if default_assignee:
+        fields['assignee'] = {'name': default_assignee}
+
     return fields
 
 
@@ -698,11 +711,15 @@ def add_jira_issue(obj, *args, **kwargs):
 
     obj_can_be_pushed_to_jira, error_message, error_code = can_be_pushed_to_jira(obj)
     if not obj_can_be_pushed_to_jira:
-        log_jira_alert(error_message, obj)
-        logger.warning("%s cannot be pushed to JIRA: %s.", to_str_typed(obj), error_message)
-        logger.warning("The JIRA issue will NOT be created.")
+        if isinstance(obj, Finding) and obj.duplicate and not obj.active:
+            logger.warning("%s will not be pushed to JIRA as it's a duplicate finding", to_str_typed(obj))
+        else:
+            log_jira_alert(error_message, obj)
+            logger.warning("%s cannot be pushed to JIRA: %s.", to_str_typed(obj), error_message)
+            logger.warning("The JIRA issue will NOT be created.")
         return False
     logger.debug('Trying to create a new JIRA issue for %s...', to_str_typed(obj))
+    meta = None
     try:
         JIRAError.log_to_tempfile = False
         jira = get_jira_connection(jira_instance)
@@ -728,16 +745,20 @@ def add_jira_issue(obj, *args, **kwargs):
             priority_name=jira_priority(obj),
             epic_name_field=get_epic_name_field_name(jira_instance),
             duedate=duedate,
-            issuetype_fields=issuetype_fields)
+            issuetype_fields=issuetype_fields,
+            default_assignee=jira_project.default_assignee)
 
         logger.debug('sending fields to JIRA: %s', fields)
         new_issue = jira.create_issue(fields)
         if jira_project.default_assignee:
-            new_issue.update(assignee={'name': jira_project.default_assignee})
+            created_assignee = str(new_issue.get_field('assignee'))
+            logger.debug("new issue created with assignee %s", created_assignee)
+            if created_assignee != jira_project.default_assignee:
+                jira.assign_issue(new_issue.key, jira_project.default_assignee)
 
         # Upload dojo finding screenshots to Jira
         findings = [obj]
-        if type(obj) == Finding_Group:
+        if isinstance(obj, Finding_Group):
             findings = obj.findings.all()
 
         for find in findings:
@@ -769,7 +790,7 @@ def add_jira_issue(obj, *args, **kwargs):
         j_issue.jira_creation = timezone.now()
         j_issue.jira_change = timezone.now()
         j_issue.save()
-        issue = jira.issue(new_issue.id)
+        jira.issue(new_issue.id)
 
         logger.info('Created the following jira issue for %d:%s', obj.id, to_str_typed(obj))
 
@@ -825,6 +846,7 @@ def update_jira_issue(obj, *args, **kwargs):
         return False
 
     j_issue = obj.jira_issue
+    meta = None
     try:
         JIRAError.log_to_tempfile = False
         jira = get_jira_connection(jira_instance)
@@ -858,7 +880,7 @@ def update_jira_issue(obj, *args, **kwargs):
 
         # Upload dojo finding screenshots to Jira
         findings = [obj]
-        if type(obj) == Finding_Group:
+        if isinstance(obj, Finding_Group):
             findings = obj.findings.all()
 
         for find in findings:
@@ -890,7 +912,9 @@ def update_jira_issue(obj, *args, **kwargs):
     except JIRAError as e:
         logger.exception(e)
         logger.error("jira_meta for project: %s and url: %s meta: %s", jira_project.project_key, jira_project.jira_instance.url, json.dumps(meta, indent=4))  # this is None safe
-        log_jira_alert(e.text, obj)
+        if issue_from_jira_is_active(issue):
+            # Only alert if the upstream JIRA is active, we don't care about closed issues
+            log_jira_alert(e.text, obj)
         return False
 
 
@@ -1002,12 +1026,12 @@ def get_issuetype_fields(
             project = None
             try:
                 project = meta['projects'][0]
-            except Exception as e:
+            except Exception:
                 raise JIRAError("Project misconfigured or no permissions in Jira ?")
 
             try:
                 issuetype_fields = project['issuetypes'][0]['fields'].keys()
-            except Exception as e:
+            except Exception:
                 raise JIRAError("Misconfigured default issue type ?")
 
         else:
@@ -1034,7 +1058,7 @@ def get_issuetype_fields(
 
             try:
                 issuetype_fields = [f['fieldId'] for f in issuetype_fields['values']]
-            except Exception as e:
+            except Exception:
                 raise JIRAError("Misconfigured default issue type ?")
 
     except JIRAError as e:
@@ -1052,7 +1076,7 @@ def is_jira_project_valid(jira_project):
         jira = get_jira_connection(jira_project)
         get_issuetype_fields(jira, jira_project.project_key, jira_project.jira_instance.default_issue_type)
         return True
-    except JIRAError as e:
+    except JIRAError:
         logger.debug("invalid JIRA Project Config, can't retrieve metadata for '%s'", jira_project)
         return False
 
@@ -1317,8 +1341,6 @@ def finding_link_jira(request, finding, new_jira_issue_key):
 
     finding.save(push_to_jira=False, dedupe_option=False, issue_updater_option=False)
 
-    jira_issue_url = get_jira_url(finding)
-
     return True
 
 
@@ -1349,8 +1371,6 @@ def finding_group_link_jira(request, finding_group, new_jira_issue_key):
 
     finding_group.save()
 
-    jira_issue_url = get_jira_url(finding_group)
-
     return True
 
 
@@ -1362,8 +1382,6 @@ def unlink_jira(request, obj):
     logger.debug('removing linked jira issue %s for %i:%s', obj.jira_issue.jira_key, obj.id, to_str_typed(obj))
     obj.jira_issue.delete()
     # finding.save(push_to_jira=False, dedupe_option=False, issue_updater_option=False)
-    # jira_issue_url = get_jira_url(finding)
-    return True
 
 
 # return True if no errors

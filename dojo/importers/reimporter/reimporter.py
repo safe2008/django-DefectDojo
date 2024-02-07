@@ -42,13 +42,13 @@ class DojoDefaultReImporter(object):
         scan_date=None,
         do_not_reactivate=False,
         create_finding_groups_for_all_findings=True,
+        apply_tags_to_findings=False,
         **kwargs,
     ):
 
         items = parsed_findings
         original_items = list(test.finding_set.all())
         new_items = []
-        mitigated_count = 0
         finding_count = 0
         finding_added_count = 0
         reactivated_count = 0
@@ -111,7 +111,6 @@ class DojoDefaultReImporter(object):
             findings = reimporter_utils.match_new_finding_to_existing_finding(
                 item, test, deduplication_algorithm
             )
-
             deduplicationLogger.debug(
                 "found %i findings matching with current new finding", len(findings)
             )
@@ -142,6 +141,8 @@ class DojoDefaultReImporter(object):
                 elif finding.is_mitigated:
                     # if the reimported item has a mitigation time, we can compare
                     if item.is_mitigated:
+                        unchanged_items.append(finding)
+                        unchanged_count += 1
                         if item.mitigated:
                             logger.debug(
                                 "item mitigated time: "
@@ -283,6 +284,10 @@ class DojoDefaultReImporter(object):
                             finding.active = False
                             if verified is not None:
                                 finding.verified = verified
+                        else:
+                            # if finding is the same but list of affected was changed, finding is marked as unchanged. This is a known issue
+                            unchanged_items.append(finding)
+                            unchanged_count += 1
 
                     if (component_name is not None and not finding.component_name) or (
                         component_version is not None and not finding.component_version
@@ -299,9 +304,6 @@ class DojoDefaultReImporter(object):
                         )
                         finding.save(dedupe_option=False)
 
-                    # if finding is the same but list of affected was changed, finding is marked as unchanged. This is a known issue
-                    unchanged_items.append(finding)
-                    unchanged_count += 1
                 if finding.dynamic_finding:
                     logger.debug(
                         "Re-import found an existing dynamic finding for this new finding. Checking the status of endpoints"
@@ -449,7 +451,7 @@ class DojoDefaultReImporter(object):
                 [
                     finding.finding_group
                     for finding in reactivated_items + unchanged_items
-                    if finding.finding_group is not None
+                    if finding.finding_group is not None and not finding.is_mitigated
                 ]
             ):
                 jira_helper.push_to_jira(finding_group)
@@ -568,6 +570,7 @@ class DojoDefaultReImporter(object):
         service=None,
         do_not_reactivate=False,
         create_finding_groups_for_all_findings=True,
+        apply_tags_to_findings=False,
     ):
 
         logger.debug(f"REIMPORT_SCAN: parameters: {locals()}")
@@ -738,21 +741,23 @@ class DojoDefaultReImporter(object):
                 reactivated_findings,
                 untouched_findings,
             )
-
+        if apply_tags_to_findings and tags:
+            for finding in test_import.findings_affected.all():
+                for tag in tags:
+                    finding.tags.add(tag)
         logger.debug("REIMPORT_SCAN: Generating notifications")
 
         updated_count = (
             len(closed_findings) + len(reactivated_findings) + len(new_findings)
         )
-        if updated_count > 0:
-            notifications_helper.notify_scan_added(
-                test,
-                updated_count,
-                new_findings=new_findings,
-                findings_mitigated=closed_findings,
-                findings_reactivated=reactivated_findings,
-                findings_untouched=untouched_findings,
-            )
+        notifications_helper.notify_scan_added(
+            test,
+            updated_count,
+            new_findings=new_findings,
+            findings_mitigated=closed_findings,
+            findings_reactivated=reactivated_findings,
+            findings_untouched=untouched_findings,
+        )
 
         logger.debug("REIMPORT_SCAN: Done")
 

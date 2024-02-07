@@ -25,7 +25,7 @@ for asynchronous execution. [RabbitMQ](https://www.rabbitmq.com/) is a well esta
 
 ## Celery Worker
 
-Tasks like deduplication or the JIRA synchonization are performed asynchronously
+Tasks like deduplication or the JIRA synchronization are performed asynchronously
 in the background by the [Celery](https://docs.celeryproject.org/en/stable/)
 Worker.
 
@@ -43,5 +43,5 @@ itself down after all tasks are performed.
 
 ## Database
 
-The Database stores all the application data of DefectDojo. Currently [MySQL](https://dev.mysql.com/)
-and [PostgreSQL](https://www.postgresql.org/) are supported. Please note the `django-watson` search engine require one or more MyISAM tables, so you cannot use Azure MySQL or Cloud SQL for MySQL. AWS RDS MySQL supports MyISAM tables.
+The Database stores all the application data of DefectDojo. Currently [PostgreSQL](https://www.postgresql.org/) and [MySQL](https://dev.mysql.com/)
+are supported, with PostgreSQL being the recommended option. Please note the `django-watson` search engine require one or more MyISAM tables, so you cannot use Azure MySQL or Cloud SQL for MySQL. AWS RDS MySQL supports MyISAM tables.

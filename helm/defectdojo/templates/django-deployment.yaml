@@ -11,6 +11,9 @@ metadata:
     helm.sh/chart: {{ include "defectdojo.chart" . }}
 spec:
   replicas: {{ .Values.django.replicas }}
+  {{- if .Values.revisionHistoryLimit }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  {{- end }}
   selector:
     matchLabels:
       defectdojo.org/component: django
@@ -41,24 +44,6 @@ spec:
         checksum/esecret: {{ include (print $.Template.BasePath "/extra-secret.yaml") . | sha256sum }}
       {{- end }}
     spec:
-    {{- if .Values.admin.ssl }}
-      initContainers:
-        - name: init-database-cert
-          image: busybox
-          command:
-            - sh
-            - -c
-            - cp -LR /app/dojo/mnt/* /app/dojo/local/ && chown -R 1001:1001 /app/dojo/local
-              && chmod -R 777 /app/dojo/local && chmod -R 600 /app/dojo/local/certs/*
-              && ls -la /app/dojo/local/certs/
-          securityContext:
-            runAsUser: 0
-          volumeMounts:
-            - mountPath: /app/dojo/mnt
-              name: ssl-volume
-            - mountPath: /app/dojo/local
-              name: local-volume
-      {{- end }}
       serviceAccountName: {{ $fullName }}
       {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -71,21 +56,6 @@ spec:
       volumes:
       - name: run
         emptyDir: {}
-      {{- if .Values.admin.ssl }}
-      - name: local-volume
-        emptyDir: { }
-      - name: ssl-volume
-        secret:
-          secretName: psql-tls
-          defaultMode: 0600
-          items:
-            - key: server-ca.pem
-              path: certs/server-ca.pem
-            - key: client-cert.pem
-              path: certs/client-cert.pem
-            - key: client-key.pem
-              path: certs/client-key.pem
-      {{- end }}
       {{- if  .Values.django.uwsgi.certificates.enabled }}
       - name: cert-mount
         configMap:
@@ -139,10 +109,14 @@ spec:
         image: {{ .Values.monitoring.prometheus.image }}
         imagePullPolicy: {{ .Values.monitoring.prometheus.imagePullPolicy }}
         command: [ '/usr/bin/nginx-prometheus-exporter', '-nginx.scrape-uri', 'http://127.0.0.1:8080/nginx_status']
+        ports:
+        - name: http-metrics
+          protocol: TCP
+          containerPort: 9113
         livenessProbe:
           httpGet:
             path: /metrics
-            port: 9113
+            port: http-metrics
           periodSeconds: 20
           initialDelaySeconds: 15
           timeoutSeconds: 5
@@ -157,11 +131,6 @@ spec:
         volumeMounts:
         - name: run
           mountPath: /run/defectdojo
-        {{- if .Values.admin.ssl }}
-        - name: local-volume
-          mountPath: "/app/dojo/local"
-          readOnly: true
-        {{- end }}
         {{- if  .Values.django.uwsgi.certificates.enabled }}
         - name: cert-mount
           mountPath: {{ .Values.django.uwsgi.certificates.certMountPath }}
@@ -179,7 +148,7 @@ spec:
           mountPath: {{.Values.extraConfigs.DD_MEDIA_ROOT | default "/app/media" | quote }}
         {{- end }}
         ports:
-        - name: http
+        - name: http-uwsgi
           protocol: TCP
           containerPort: 8081
         {{- if .Values.django.uwsgi.enable_debug }}
@@ -242,7 +211,7 @@ spec:
         livenessProbe:
           httpGet:
             path: /login?force_login_form&next=/
-            port: http
+            port: http-uwsgi
             httpHeaders:
             - name: Host
               value: {{ .Values.host }}

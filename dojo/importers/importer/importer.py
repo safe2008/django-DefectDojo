@@ -35,14 +35,20 @@ class DojoDefaultImporter(object):
         if created:
             logger.info('Created new Test_Type with name %s because a report is being imported', test_type.name)
 
+        if scan_date and not scan_date.tzinfo:
+            scan_date = timezone.make_aware(scan_date)
+
+        if now and not now.tzinfo:
+            now = timezone.make_aware(now)
+
         test = Test(
             title=title,
             engagement=engagement,
             lead=lead,
             test_type=test_type,
             scan_type=scan_type,
-            target_start=scan_date if scan_date else now.date(),
-            target_end=scan_date if scan_date else now.date(),
+            target_start=scan_date or now,
+            target_end=scan_date or now,
             environment=environment,
             percent_complete=100,
             version=version,
@@ -66,7 +72,6 @@ class DojoDefaultImporter(object):
         new_findings = []
         items = parsed_findings
         logger.debug('starting import of %i items.', len(items) if items else 0)
-        i = 0
         group_names_to_findings_dict = {}
 
         for item in items:
@@ -174,8 +179,17 @@ class DojoDefaultImporter(object):
 
     def close_old_findings(self, test, scan_date_time, user, push_to_jira=None, service=None, close_old_findings_product_scope=False):
         # Close old active findings that are not reported by this scan.
-        new_hash_codes = test.finding_set.values('hash_code')
-
+        # Refactoring this to only call test.finding_set.values() once.
+        findings = test.finding_set.values()
+        mitigated_hash_codes = []
+        new_hash_codes = []
+        for finding in findings:
+            new_hash_codes.append(finding["hash_code"])
+            if finding["is_mitigated"]:
+                mitigated_hash_codes.append(finding["hash_code"])
+                for hash_code in new_hash_codes:
+                    if hash_code == finding["hash_code"]:
+                        new_hash_codes.remove(hash_code)
         if close_old_findings_product_scope:
             # Close old findings of the same test type in the same product
             old_findings = Finding.objects.exclude(test=test) \
@@ -229,7 +243,7 @@ class DojoDefaultImporter(object):
     def import_scan(self, scan, scan_type, engagement, lead, environment, active=None, verified=None, tags=None, minimum_severity=None,
                     user=None, endpoints_to_add=None, scan_date=None, version=None, branch_tag=None, build_id=None,
                     commit_hash=None, push_to_jira=None, close_old_findings=False, close_old_findings_product_scope=False,
-                    group_by=None, api_scan_configuration=None, service=None, title=None, create_finding_groups_for_all_findings=True):
+                    group_by=None, api_scan_configuration=None, service=None, title=None, create_finding_groups_for_all_findings=True, apply_tags_to_findings=False):
 
         logger.debug(f'IMPORT_SCAN: parameters: {locals()}')
 
@@ -348,12 +362,15 @@ class DojoDefaultImporter(object):
             test_import = importer_utils.update_import_history(Test_Import.IMPORT_TYPE, active, verified, tags, minimum_severity,
                                                                 endpoints_to_add, version, branch_tag, build_id, commit_hash,
                                                                 push_to_jira, close_old_findings, test, new_findings, closed_findings)
+            if apply_tags_to_findings and tags:
+                for finding in test_import.findings_affected.all():
+                    for tag in tags:
+                        finding.tags.add(tag)
 
         logger.debug('IMPORT_SCAN: Generating notifications')
         notifications_helper.notify_test_created(test)
         updated_count = len(new_findings) + len(closed_findings)
-        if updated_count > 0:
-            notifications_helper.notify_scan_added(test, updated_count, new_findings=new_findings, findings_mitigated=closed_findings)
+        notifications_helper.notify_scan_added(test, updated_count, new_findings=new_findings, findings_mitigated=closed_findings)
 
         logger.debug('IMPORT_SCAN: Updating Test progress')
         importer_utils.update_test_progress(test)

@@ -103,9 +103,8 @@ def api_v2_key(request):
                    'form': form,
                    })
 
+
 # #  user specific
-
-
 @dojo_ratelimit(key='post:username')
 @dojo_ratelimit(key='post:password')
 def login_view(request):
@@ -182,12 +181,12 @@ def delete_alerts(request):
     alerts = Alerts.objects.filter(user_id=request.user)
 
     if request.method == 'POST':
-        removed_alerts = request.POST.getlist('alert_select')
         alerts.filter().delete()
-        messages.add_message(request,
-                                        messages.SUCCESS,
-                                        _('Alerts removed.'),
-                                        extra_tags='alert-success')
+        messages.add_message(
+            request,
+            messages.SUCCESS,
+            _('Alerts removed.'),
+            extra_tags='alert-success')
         return HttpResponseRedirect('alerts')
 
     return render(request,
@@ -271,9 +270,7 @@ def change_password(request):
     if request.method == 'POST':
         form = ChangePasswordForm(request.POST, user=user)
         if form.is_valid():
-            current_password = form.cleaned_data['current_password']
             new_password = form.cleaned_data['new_password']
-            confirm_password = form.cleaned_data['confirm_password']
 
             user.set_password(new_password)
             Dojo_User.disable_force_password_reset(user)
@@ -644,7 +641,8 @@ class DojoPasswordResetForm(PasswordResetForm):
             if isinstance(connection, EmailBackend):
                 connection.open()
                 connection.close()
-        except Exception:
+        except Exception as e:
+            logger.error(f"SMTP Server Connection Failure: {str(e)}")
             raise ValidationError("SMTP server is not configured correctly...")
 
 

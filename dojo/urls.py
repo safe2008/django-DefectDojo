@@ -23,7 +23,8 @@ from dojo.api_v2.views import EndPointViewSet, EngagementViewSet, \
     NotificationsViewSet, EngagementPresetsViewset, NetworkLocationsViewset, UserContactInfoViewSet, \
     ProductAPIScanConfigurationViewSet, UserProfileView, EndpointMetaImporterView, \
     ConfigurationPermissionViewSet, QuestionnaireQuestionViewSet, QuestionnaireAnswerViewSet, \
-    QuestionnaireGeneralSurveyViewSet, QuestionnaireEngagementSurveyViewSet, QuestionnaireAnsweredSurveyViewSet
+    QuestionnaireGeneralSurveyViewSet, QuestionnaireEngagementSurveyViewSet, QuestionnaireAnsweredSurveyViewSet, \
+    AnnouncementViewSet
 
 from dojo.utils import get_system_setting
 from dojo.development_environment.urls import urlpatterns as dev_env_urls
@@ -52,16 +53,15 @@ from dojo.system_settings.urls import urlpatterns as system_settings_urls
 from dojo.notifications.urls import urlpatterns as notifications_urls
 from dojo.object.urls import urlpatterns as object_urls
 from dojo.benchmark.urls import urlpatterns as benchmark_urls
-from dojo.rules.urls import urlpatterns as rule_urls
 from dojo.notes.urls import urlpatterns as notes_urls
 from dojo.note_type.urls import urlpatterns as note_type_urls
-from dojo.google_sheet.urls import urlpatterns as google_sheets_urls
 from dojo.banner.urls import urlpatterns as banner_urls
 from dojo.survey.urls import urlpatterns as survey_urls
 from dojo.components.urls import urlpatterns as component_urls
 from dojo.regulations.urls import urlpatterns as regulations
 from dojo.announcement.urls import urlpatterns as announcement_urls
-from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+from drf_spectacular.views import SpectacularSwaggerView
+from dojo.api_v2.views import DojoSpectacularAPIView as SpectacularAPIView
 
 import logging
 logger = logging.getLogger(__name__)
@@ -132,6 +132,7 @@ v2_api.register(r'questionnaire_answered_questionnaires', QuestionnaireAnsweredS
 v2_api.register(r'questionnaire_engagement_questionnaires', QuestionnaireEngagementSurveyViewSet)
 v2_api.register(r'questionnaire_general_questionnaires', QuestionnaireGeneralSurveyViewSet)
 v2_api.register(r'questionnaire_questions', QuestionnaireQuestionViewSet)
+v2_api.register(r'announcements', AnnouncementViewSet)
 ur = []
 ur += dev_env_urls
 ur += endpoint_urls
@@ -159,34 +160,53 @@ ur += system_settings_urls
 ur += notifications_urls
 ur += object_urls
 ur += benchmark_urls
-ur += rule_urls
 ur += notes_urls
 ur += note_type_urls
-ur += google_sheets_urls
 ur += banner_urls
 ur += component_urls
 ur += regulations
 ur += announcement_urls
 
+api_v2_urls = [
+    #  Django Rest Framework API v2
+    re_path(r'^%sapi/v2/' % get_system_setting('url_prefix'), include(v2_api.urls)),
+    re_path(r'^%sapi/v2/user_profile/' % get_system_setting('url_prefix'), UserProfileView.as_view(), name='user_profile'),
+]
+
+if hasattr(settings, 'API_TOKENS_ENABLED'):
+    if settings.API_TOKENS_ENABLED:
+        api_v2_urls += [
+            re_path(
+                f"^{get_system_setting('url_prefix')}api/v2/api-token-auth/",
+                tokenviews.obtain_auth_token,
+                name='api-token-auth',
+            )
+        ]
+
 schema_view = get_schema_view(
     openapi.Info(
         title="Defect Dojo API",
         default_version='v2',
-        description="To use the API you need be authorized.",
+        description="To use the API you need be authorized.\n\n## Deprecated - Removal in v2.30.0\n#### Please use the [OpenAPI3 version](/api/v2/oa3/swagger-ui/)",
     ),
     # if public=False, includes only endpoints the current user has access to
     public=True,
     # The API of a OpenSource project should be public accessible
     permission_classes=[permissions.AllowAny],
+    # url pattersns specific to the API
+    patterns=api_v2_urls,
 )
 
-urlpatterns = [
-    #  Django Rest Framework API v2
-    re_path(r'^%sapi/v2/' % get_system_setting('url_prefix'), include(v2_api.urls)),
+urlpatterns = []
+
+# sometimes urlpatterns needed be added from local_settings.py before other URLs of core dojo
+if hasattr(settings, 'PRELOAD_URL_PATTERNS'):
+    urlpatterns += settings.PRELOAD_URL_PATTERNS
+
+urlpatterns += [
     # action history
     re_path(r'^%shistory/(?P<cid>\d+)/(?P<oid>\d+)$' % get_system_setting('url_prefix'), views.action_history, name='action_history'),
     re_path(r'^%s' % get_system_setting('url_prefix'), include(ur)),
-    re_path(r'^%sapi/v2/user_profile/' % get_system_setting('url_prefix'), UserProfileView.as_view(), name='user_profile'),
 
     # drf-yasg = OpenAPI2
     re_path(r'^%sapi/v2/doc/' % get_system_setting('url_prefix'), schema_view.with_ui('swagger', cache_timeout=0), name='api_v2_schema'),
@@ -201,6 +221,7 @@ urlpatterns = [
     re_path(r'^%s/(?P<path>.*)$' % settings.MEDIA_URL.strip('/'), views.protected_serve, {'document_root': settings.MEDIA_ROOT})
 ]
 
+urlpatterns += api_v2_urls
 urlpatterns += survey_urls
 
 if hasattr(settings, 'DJANGO_METRICS_ENABLED'):
@@ -217,10 +238,16 @@ if hasattr(settings, 'DJANGO_ADMIN_ENABLED'):
         #  django admin
         urlpatterns += [re_path(r'^%sadmin/' % get_system_setting('url_prefix'), admin.site.urls)]
 
-if hasattr(settings, 'API_TOKENS_ENABLED'):
-    if settings.API_TOKENS_ENABLED:
-        urlpatterns += [re_path(r'^%sapi/v2/api-token-auth/' % get_system_setting('url_prefix'), tokenviews.obtain_auth_token, name='api-token-auth')]
-
 # sometimes urlpatterns needed be added from local_settings.py to avoid having to modify core defect dojo files
 if hasattr(settings, 'EXTRA_URL_PATTERNS'):
     urlpatterns += settings.EXTRA_URL_PATTERNS
+
+
+# Remove any other endpoints that drf-spectacular is guessing should be in the swagger
+def drf_spectacular_preprocessing_filter_spec(endpoints):
+    filtered = []
+    for (path, path_regex, method, callback) in endpoints:
+        # Remove all but DRF API endpoints
+        if path.startswith("/api/v2/"):
+            filtered.append((path, path_regex, method, callback))
+    return filtered

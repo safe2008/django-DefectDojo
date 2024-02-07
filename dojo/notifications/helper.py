@@ -20,14 +20,22 @@ logger = logging.getLogger(__name__)
 def create_notification(event=None, **kwargs):
     system_settings = System_Settings.objects.get()
     kwargs["system_settings"] = system_settings
+    # System notifications
+    try:
+        system_notifications = Notifications.objects.get(user=None, template=False)
+    except Exception:
+        system_notifications = Notifications()
 
     if 'recipients' in kwargs:
         # mimic existing code so that when recipients is specified, no other system or personal notifications are sent.
         logger.debug('creating notifications for recipients: %s', kwargs['recipients'])
         for recipient_notifications in Notifications.objects.filter(user__username__in=kwargs['recipients'], user__is_active=True, product=None):
-            # kwargs.update({'user': recipient_notifications.user})
-            logger.debug('Sent notification to %s', recipient_notifications.user)
-            process_notifications(event, recipient_notifications, **kwargs)
+            # merge the system level notifications with the personal level
+            # this allows for system to trump the personal
+            merged_notifications = Notifications.merge_notifications_list([system_notifications, recipient_notifications])
+            merged_notifications.user = recipient_notifications.user
+            logger.debug('Sent notification to %s', merged_notifications.user)
+            process_notifications(event, merged_notifications, **kwargs)
 
     else:
         logger.debug('creating system notifications for event: %s', event)
@@ -60,12 +68,6 @@ def create_notification(event=None, **kwargs):
             from dojo.utils import get_product
             product = get_product(kwargs['obj'])
             logger.debug("Defined product of obj %s", product)
-
-        # System notifications
-        try:
-            system_notifications = Notifications.objects.get(user=None, template=False)
-        except Exception:
-            system_notifications = Notifications()
 
         # System notifications are sent one with user=None, which will trigger email to configured system email, to global slack channel, etc.
         process_notifications(event, system_notifications, **kwargs)
@@ -268,8 +270,11 @@ def send_msteams_notification(event, user=None, *args, **kwargs):
 @app.task
 def send_mail_notification(event, user=None, *args, **kwargs):
     from dojo.utils import get_system_setting
-
-    if user:
+    email_from_address = get_system_setting('email_from')
+    # Attempt to get the "to" address
+    if "recipient" in kwargs:
+        address = kwargs.get("recipient")
+    elif user:
         address = user.email
     else:
         address = get_system_setting('mail_notifications_to')
@@ -277,16 +282,16 @@ def send_mail_notification(event, user=None, *args, **kwargs):
     logger.debug('notification email for user %s to %s', user, address)
 
     try:
-        subject = '%s notification' % get_system_setting('team_name')
+        subject = f"{get_system_setting('team_name')} notification"
         if 'title' in kwargs:
-            subject += ': %s' % kwargs['title']
+            subject += f": {kwargs['title']}"
 
         email = EmailMessage(
             subject,
             create_notification_message(event, user, 'mail', *args, **kwargs),
-            get_system_setting('email_from'),
+            email_from_address,
             [address],
-            headers={"From": "{}".format(get_system_setting('email_from'))}
+            headers={"From": f"{email_from_address}"},
         )
         email.content_subtype = 'html'
         logger.debug('sending email alert')
@@ -296,7 +301,6 @@ def send_mail_notification(event, user=None, *args, **kwargs):
     except Exception as e:
         logger.exception(e)
         log_alert(e, "Email Notification", title=kwargs['title'], description=str(e), url=kwargs['url'])
-        pass
 
 
 def send_alert_notification(event, user=None, *args, **kwargs):
@@ -388,6 +392,12 @@ def notify_scan_added(test, updated_count, new_findings=[], findings_mitigated=[
     findings_untouched = sorted(list(findings_untouched), key=lambda x: x.numerical_severity)
 
     title = 'Created/Updated ' + str(updated_count) + " findings for " + str(test.engagement.product) + ': ' + str(test.engagement.name) + ': ' + str(test)
-    create_notification(event='scan_added', title=title, findings_new=new_findings, findings_mitigated=findings_mitigated, findings_reactivated=findings_reactivated,
+
+    if updated_count == 0:
+        event = 'scan_added_empty'
+    else:
+        event = 'scan_added'
+
+    create_notification(event=event, title=title, findings_new=new_findings, findings_mitigated=findings_mitigated, findings_reactivated=findings_reactivated,
                         finding_count=updated_count, test=test, engagement=test.engagement, product=test.engagement.product, findings_untouched=findings_untouched,
                         url=reverse('view_test', args=(test.id,)))
